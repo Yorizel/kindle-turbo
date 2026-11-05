@@ -43,8 +43,9 @@ fn chapters_in_natural_order_and_pages_fit_screen() {
     let pages = page_images(&azw);
     assert!(pages.len() >= 9, "strips must be cut into several pages, got {}", pages.len());
     for p in &pages {
-        assert_eq!(p.width(), comic::PAGE_W);
-        assert!(p.height() <= comic::PAGE_H);
+        // 800 px strips are never upscaled; page keeps the screen aspect ratio
+        assert_eq!(p.width(), 800);
+        assert!(p.height() <= 800 * comic::PAGE_H / comic::PAGE_W);
     }
     assert_eq!(azw.title, "Teste");
 }
@@ -120,7 +121,59 @@ fn cbz_for_koreader_keeps_order_and_screen_size() {
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut buf).unwrap();
         let img = image::load_from_memory(&buf).unwrap();
-        assert_eq!(img.width(), comic::PAGE_W);
-        assert!(img.height() <= comic::PAGE_H);
+        assert_eq!(img.width(), 800);
+        assert!(img.height() <= 800 * comic::PAGE_H / comic::PAGE_W);
+    }
+}
+
+#[test]
+fn gutters_are_collapsed_so_pages_are_few() {
+    let dir = tempfile::tempdir().unwrap();
+    // two panels separated by a huge 3000 px white gap
+    let img = webtoon_strip(800, 5000, &[(0, 900), (3900, 4900)]);
+    std::fs::write(dir.path().join("1.png"), encode(&img, ImageFormat::Png)).unwrap();
+    let r = comic::render(dir.path(), None).unwrap();
+    let pages: usize = r.chapters.iter().map(|c| c.pages.len()).sum();
+    assert!(pages <= 2, "white gap must not become pages: {pages}");
+}
+
+#[test]
+fn pdf_has_one_page_per_image_and_chapter_bookmarks() {
+    let dir = tempfile::tempdir().unwrap();
+    for ch in ["Cap 10", "Cap 9"] {
+        std::fs::create_dir(dir.path().join(ch)).unwrap();
+        let img = webtoon_strip(720, 6000, &[(100, 1500), (1700, 3200), (3400, 5900)]);
+        std::fs::write(dir.path().join(ch).join("001.img"), encode(&img, ImageFormat::WebP)).unwrap();
+    }
+    let r = comic::render(dir.path(), Some("Série Ç")).unwrap();
+    let pdf = kindle_turbo::pdf::to_pdf(&r).unwrap();
+    let s = String::from_utf8_lossy(&pdf);
+    let n_pages: usize = r.chapters.iter().map(|c| c.pages.len()).sum();
+    assert_eq!(s.matches("/Type /Page ").count(), n_pages);
+    assert!(s.contains(&format!("/Count {n_pages}")));
+    assert!(s.contains("/Type /Outlines"));
+    // chapter titles in natural order as UTF-16BE hex
+    let hex = |t: &str| {
+        t.encode_utf16().fold(String::new(), |mut acc, u| {
+            std::fmt::Write::write_fmt(&mut acc, format_args!("{u:04X}")).unwrap();
+            acc
+        })
+    };
+    let p9 = s.find(&hex("Cap 9")).unwrap();
+    let p10 = s.find(&hex("Cap 10")).unwrap();
+    assert!(p9 < p10);
+    assert!(s.ends_with("%%EOF\n"));
+    // xref offsets point at real objects
+    let xref = s.rfind("xref\n").unwrap();
+    for line in s[xref..].lines().skip(3).take_while(|l| l.ends_with(" n ")) {
+        let off: usize = line[..10].parse().unwrap();
+        assert!(s[off..].starts_with(|c: char| c.is_ascii_digit()) && s[off..off + 20].contains(" 0 obj"));
+    }
+    if std::process::Command::new("pdfinfo").arg("-v").output().is_ok() {
+        let f = dir.path().join("x.pdf");
+        std::fs::write(&f, &pdf).unwrap();
+        let out = std::process::Command::new("pdfinfo").arg(&f).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains(&format!("Pages:           {n_pages}")));
     }
 }

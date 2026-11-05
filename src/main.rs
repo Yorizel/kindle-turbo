@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use kindle_turbo::{comic, epub, images, kf8, passthrough, reader};
+use kindle_turbo::{comic, epub, images, kf8, passthrough, pdf, reader};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -44,8 +44,8 @@ struct Cli {
     #[arg(long)]
     offline: bool,
 
-    /// Modo `KOReader`: manhwa vira CBZ com páginas do tamanho da tela; EPUB é copiado
-    /// como está. Com --kindle, vai para `documents/Lendo`.
+    /// Modo `KOReader`: manhwa vira um PDF só (páginas do tamanho da tela, marcador por
+    /// capítulo) em `documents/Manhwas`; EPUB vai como está para `documents/Novels`.
     #[arg(long)]
     koreader: bool,
 
@@ -254,18 +254,20 @@ fn is_comic(input: &Path) -> bool {
 
 /// `KOReader` reads EPUB and CBZ natively: copy EPUBs, pre-render comics.
 fn koreader_one(input: &Path, cli: &Cli, out_dir: &Path, kindle: Option<&Path>, t: Instant) -> Result<Done> {
-    let (name, data) = if is_comic(input) {
+    // manhwa: one PDF per series with a bookmark per chapter -> documents/Manhwas
+    // novel: the EPUB as-is -> documents/Novels
+    let (folder, name, data) = if is_comic(input) {
         let rendered = comic::render(input, cli.title.as_deref())?;
-        (format!("{}.cbz", sanitize(&rendered.title)), comic::to_cbz(&rendered)?)
+        ("Manhwas", format!("{}.pdf", sanitize(&rendered.title)), pdf::to_pdf(&rendered)?)
     } else {
         let data = std::fs::read(input).with_context(|| format!("lendo {}", input.display()))?;
         let title = cli.title.clone().map_or_else(|| epub::open(&data).map(|b| b.meta.title), Ok)?;
-        (format!("{}.epub", sanitize(&title)), data)
+        ("Novels", format!("{}.epub", sanitize(&title)), data)
     };
     let path = out_dir.join(&name);
     std::fs::write(&path, &data).with_context(|| format!("gravando {}", path.display()))?;
     if let Some(k) = kindle {
-        let dir = k.join("documents").join("Lendo");
+        let dir = k.join("documents").join(folder);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join(&name), &data)?;
     }

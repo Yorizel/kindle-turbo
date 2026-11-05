@@ -20,7 +20,8 @@ Medido num processador de 28 threads. O texto convertido foi conferido com o lei
 - **Capa personalizada**: `--cover imagem.jpg`.
 - **EPUB sem capa**: busca a capa oficial no AniList / Open Library; sem internet (`--offline`) gera uma capa com título e autor.
 - **Verificação**: `kindle-turbo --check livro.azw3` decodifica o arquivo inteiro com um leitor KF8 independente (incluso) e mostra um resumo.
-- Imagens WebP/BMP viram JPEG ajustado à tela; JPEG/PNG/GIF passam sem recompressão.
+- Imagens WebP/BMP viram JPEG ajustado à tela; JPEG/PNG/GIF passam sem recompressão (PNG otimizado sem perdas).
+- **Manhwa para KOReader** (`--koreader`): sem upscaling, espaços brancos entre painéis encolhidos, cinza com JPEG otimizado (q65, indistinguível em e-ink), JPEGs embutidos no PDF sem recompressão. 7 capítulos (~1000 telas) em 5 s, 87 MB.
 
 ## Instalar
 
@@ -56,7 +57,7 @@ Opções:
 | `--no-compress` | não comprime o texto |
 | `--offline` | não busca capa na internet |
 | `--check` | só verifica arquivos AZW3 |
-| `--koreader` | para KOReader: manhwa vira CBZ com páginas do tamanho da tela (vira com toque/deslize), EPUB vai como está; com `--kindle` cai em `documents/Lendo` |
+| `--koreader` | para KOReader: manhwa vira **um PDF só** com marcador por capítulo (páginas do tamanho da tela, vira com toque/deslize) em `documents/Manhwas`; EPUB vai como está para `documents/Novels` |
 
 Depois de usar `--kindle`, ejete antes de desconectar:
 

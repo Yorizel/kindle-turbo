@@ -14,4 +14,5 @@ pub mod kf8;
 pub mod mobi;
 pub mod palmdoc;
 pub mod passthrough;
+pub mod pdf;
 pub mod reader;

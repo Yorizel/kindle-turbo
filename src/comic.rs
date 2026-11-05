@@ -13,7 +13,8 @@ use std::path::Path;
 
 pub const PAGE_W: u32 = 1236;
 pub const PAGE_H: u32 = 1648;
-const JPEG_Q: u8 = 82;
+/// e-ink shows 16 grey levels; q65 is visually identical there and ~20% smaller than q80
+const JPEG_Q: u8 = 65;
 const BATCH: usize = 48;
 const CSS: &str = "@page{margin:0}body{margin:0;padding:0;text-align:center}img{width:100%;height:auto;margin:0;padding:0;display:block}div{page-break-after:always;margin:0;padding:0}";
 
@@ -22,7 +23,7 @@ type Entry = (String, Vec<u8>);
 
 fn is_image_name(n: &str) -> bool {
     let l = n.to_lowercase();
-    [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"].iter().any(|e| l.ends_with(e))
+    [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif", ".img"].iter().any(|e| l.ends_with(e))
 }
 
 /// Natural ordering: "ch2" < "ch10".
@@ -143,11 +144,11 @@ fn encode_gray(g: &GrayImage) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Wraps `PAGE_W`-wide grayscale rows in an image; the height comes from the buffer length.
-fn rows_to_gray(rows: Vec<u8>) -> Result<GrayImage> {
-    let w = PAGE_W as usize;
+/// Wraps `width`-wide grayscale rows in an image; the height comes from the buffer length.
+fn rows_to_gray(rows: Vec<u8>, width: u32) -> Result<GrayImage> {
+    let w = usize::try_from(width)?.max(1);
     let h = u32::try_from(rows.len() / w)?;
-    GrayImage::from_raw(PAGE_W, h, rows).ok_or_else(|| anyhow!("buffer de página inconsistente"))
+    GrayImage::from_raw(width, h, rows).ok_or_else(|| anyhow!("buffer de página inconsistente"))
 }
 
 /// A row is a good cut if it is (almost) a single flat colour.
@@ -164,13 +165,13 @@ fn row_is_flat(buf: &[u8], w: usize, row: usize) -> bool {
     true
 }
 
-fn find_cut(buf: &[u8], w: usize, h: usize) -> usize {
-    let target = PAGE_H as usize;
+/// Best cut row for a page of at most `target` rows: the lowest gutter row in the
+/// bottom half, so panels are not sliced and pages stay full.
+fn find_cut(buf: &[u8], w: usize, h: usize, target: usize) -> usize {
     if h <= target {
         return h;
     }
-    let min = target / 3;
-    // need a run of flat rows to avoid cutting through thin lines
+    let min = target / 2;
     let mut row = target;
     while row > min {
         if row_is_flat(buf, w, row) && row_is_flat(buf, w, row - 1) && row_is_flat(buf, w, row - 2) {
@@ -179,6 +180,27 @@ fn find_cut(buf: &[u8], w: usize, h: usize) -> usize {
         row -= 1;
     }
     target
+}
+
+/// Shrinks runs of flat rows (gutters between panels) to at most `keep` rows.
+fn collapse_gutters(g: &GrayImage, keep: usize) -> Vec<u8> {
+    let w = g.width() as usize;
+    let raw = g.as_raw();
+    let rows = raw.len() / w.max(1);
+    let mut out = Vec::with_capacity(raw.len());
+    let mut run = 0usize;
+    for r in 0..rows {
+        if row_is_flat(raw, w, r) {
+            run += 1;
+            if run > keep {
+                continue;
+            }
+        } else {
+            run = 0;
+        }
+        out.extend_from_slice(&raw[r * w..(r + 1) * w]);
+    }
+    out
 }
 
 fn is_blank(g: &GrayImage) -> bool {
@@ -191,7 +213,8 @@ fn is_blank(g: &GrayImage) -> bool {
 pub struct Chapter {
     /// Chapter name (folder name, or "Início" for a single folder).
     pub title: String,
-    /// JPEG pages, `PAGE_W` wide and at most `PAGE_H` tall.
+    /// JPEG pages: strips keep their width (never upscaled past `PAGE_W`) with the
+    /// screen aspect ratio; regular pages fit inside `PAGE_W` x `PAGE_H`.
     pub pages: Vec<Vec<u8>>,
 }
 
@@ -204,43 +227,76 @@ pub struct Rendered {
     pub chapters: Vec<Chapter>,
 }
 
+/// One decoded input image, already in its final form.
+enum Prepared {
+    /// Part of a long strip: rows of exactly the strip width, gutters collapsed.
+    Strip(Vec<u8>),
+    /// A regular page, fitted to the screen.
+    Page(GrayImage),
+}
+
+/// Strip width: the most common strip width, never upscaled past the screen.
+fn strip_width(images: &[&Entry]) -> u32 {
+    let mut widths: Vec<u32> = images
+        .par_iter()
+        .filter_map(|(_, d)| image::ImageReader::new(Cursor::new(d)).with_guessed_format().ok()?.into_dimensions().ok())
+        .filter(|&(w, h)| h > w * 19 / 10)
+        .map(|(w, _)| w)
+        .collect();
+    widths.sort_unstable();
+    widths.get(widths.len() / 2).copied().unwrap_or(PAGE_W).min(PAGE_W)
+}
+
+fn prepare(data: &[u8], width: u32) -> Option<Prepared> {
+    let g = decode_gray(data)?;
+    if g.height() <= g.width() * 19 / 10 {
+        return Some(Prepared::Page(fit_page(g)));
+    }
+    let g = if g.width() > width || g.width() < width { scale_to_width(g, width) } else { g };
+    // keep ~2.5% of the page height of white between panels
+    let keep = (width as usize * PAGE_H as usize / PAGE_W as usize) / 40;
+    Some(Prepared::Strip(collapse_gutters(&g, keep.max(8))))
+}
+
 /// Stream images of one chapter into screen pages.
 fn render_chapter(images: &[&Entry]) -> Result<Vec<Vec<u8>>> {
+    let width = strip_width(images);
+    let w = width as usize;
+    // page height for this width, keeping the screen aspect ratio
+    let target = w * PAGE_H as usize / PAGE_W as usize;
     let mut pages: Vec<GrayImage> = Vec::new();
     let mut out: Vec<Vec<u8>> = Vec::new();
-    let w = PAGE_W as usize;
-    let mut carry: Vec<u8> = Vec::new(); // rows of width PAGE_W
+    let mut carry: Vec<u8> = Vec::new();
     for batch in images.chunks(BATCH) {
-        let decoded: Vec<Option<GrayImage>> = batch.par_iter().map(|(_, d)| decode_gray(d)).collect();
-        for g in decoded.into_iter().flatten() {
-            let strip = f64::from(g.height()) / f64::from(g.width()) > 1.9;
-            if !strip {
-                // regular page: flush pending strip first
-                if !carry.is_empty() {
-                    pages.push(rows_to_gray(std::mem::take(&mut carry))?);
+        let prepared: Vec<Option<Prepared>> = batch.par_iter().map(|(_, d)| prepare(d, width)).collect();
+        for p in prepared.into_iter().flatten() {
+            match p {
+                Prepared::Page(g) => {
+                    if !carry.is_empty() {
+                        pages.push(rows_to_gray(std::mem::take(&mut carry), width)?);
+                    }
+                    pages.push(g);
                 }
-                pages.push(fit_page(g));
-                continue;
-            }
-            let g = scale_to_width(g, PAGE_W);
-            carry.extend_from_slice(g.as_raw());
-            loop {
-                let h = carry.len() / w;
-                if h < PAGE_H as usize {
-                    break;
+                Prepared::Strip(rows) => {
+                    carry.extend_from_slice(&rows);
+                    loop {
+                        let h = carry.len() / w;
+                        if h < target {
+                            break;
+                        }
+                        let cut = find_cut(&carry, w, h, target);
+                        let rest = carry.split_off(cut * w);
+                        pages.push(rows_to_gray(std::mem::replace(&mut carry, rest), width)?);
+                    }
                 }
-                let cut = find_cut(&carry, w, h);
-                let rest = carry.split_off(cut * w);
-                pages.push(rows_to_gray(std::mem::replace(&mut carry, rest))?);
             }
         }
-        // encode what we have so far in parallel to bound memory
         let ready: Vec<GrayImage> = std::mem::take(&mut pages);
         let encoded: Vec<Vec<u8>> = ready.into_par_iter().filter(|p| !is_blank(p)).map(|p| encode_gray(&p)).collect::<Result<_>>()?;
         out.extend(encoded);
     }
     if carry.len() / w > 40 {
-        let g = rows_to_gray(carry)?;
+        let g = rows_to_gray(carry, width)?;
         if !is_blank(&g) {
             out.push(encode_gray(&g)?);
         }
