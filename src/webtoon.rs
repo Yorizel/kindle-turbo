@@ -266,7 +266,7 @@ mod tests {
         let out = compose(&s, &[(10, 40), (50, 60)], &p, 255);
         assert_eq!(out.len(), p.width * p.page_h);
         assert_eq!(&out[..100], &s[10 * 100..11 * 100]);
-        assert!(out[(30 + 2) * 100..(30 + 2) * 100 + 10] == s[50 * 100..50 * 100 + 10]);
+        assert_eq!(out[(30 + 2) * 100..(30 + 2) * 100 + 10], s[50 * 100..50 * 100 + 10]);
         assert!(out[(p.page_h - 1) * 100..].iter().all(|&v| v == 255));
     }
 
