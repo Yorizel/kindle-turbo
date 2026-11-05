@@ -186,9 +186,22 @@ fn is_blank(g: &GrayImage) -> bool {
     (0..g.height() as usize).step_by(8).all(|r| row_is_flat(g.as_raw(), w, r))
 }
 
-struct Chapter {
-    title: String,
-    pages: Vec<Vec<u8>>,
+/// A chapter rendered into screen-sized grayscale JPEG pages.
+#[derive(Debug)]
+pub struct Chapter {
+    /// Chapter name (folder name, or "Início" for a single folder).
+    pub title: String,
+    /// JPEG pages, `PAGE_W` wide and at most `PAGE_H` tall.
+    pub pages: Vec<Vec<u8>>,
+}
+
+/// A whole comic rendered for the Kindle screen.
+#[derive(Debug)]
+pub struct Rendered {
+    /// Title (from `--title` or the input name).
+    pub title: String,
+    /// Chapters in natural order.
+    pub chapters: Vec<Chapter>,
 }
 
 /// Stream images of one chapter into screen pages.
@@ -241,6 +254,14 @@ fn render_chapter(images: &[&Entry]) -> Result<Vec<Vec<u8>>> {
 ///
 /// Fails if the input cannot be read, holds no images, or produces no pages.
 pub fn open(input: &Path, title: Option<&str>) -> Result<Book> {
+    to_book(render(input, title)?)
+}
+
+/// Decode, stitch and cut every image of `input` into screen pages.
+///
+/// # Errors
+/// Fails when the input has no readable images.
+pub fn render(input: &Path, title: Option<&str>) -> Result<Rendered> {
     let items = collect(input)?;
     // group by parent folder => chapters
     let mut chapters_raw: Vec<(String, Vec<&Entry>)> = Vec::new();
@@ -267,7 +288,41 @@ pub fn open(input: &Path, title: Option<&str>) -> Result<Book> {
         .collect::<Result<_>>()?;
 
     let name = title.map_or_else(|| input.file_stem().map_or_else(|| "Manhwa".into(), |s| s.to_string_lossy().into_owned()), str::to_owned);
+    if chapters.iter().all(|c| c.pages.is_empty()) {
+        return Err(anyhow!("nenhuma página gerada"));
+    }
+    Ok(Rendered { title: name, chapters })
+}
 
+/// Package rendered pages as a CBZ (stored, no recompression), one folder per
+/// chapter so `KOReader` keeps the order and shows chapter boundaries.
+///
+/// # Errors
+/// Only fails on an internal zip write error.
+pub fn to_cbz(r: &Rendered) -> Result<Vec<u8>> {
+    use std::io::Write as _;
+    let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut n = 0usize;
+    for (ci, ch) in r.chapters.iter().enumerate() {
+        let folder: String = ch.title.chars().map(|c| if matches!(c, '/' | '\\') { '_' } else { c }).collect();
+        for p in &ch.pages {
+            n += 1;
+            z.start_file(format!("{:03} {folder}/{n:05}.jpg", ci + 1), opts)?;
+            z.write_all(p)?;
+        }
+    }
+    z.start_file("ComicInfo.xml", opts)?;
+    let mut title = Vec::new();
+    crate::dom::escape_text(&r.title, &mut title);
+    z.write_all(b"<?xml version=\"1.0\"?><ComicInfo><Title>")?;
+    z.write_all(&title)?;
+    write!(z, "</Title><PageCount>{n}</PageCount><Manga>No</Manga></ComicInfo>")?;
+    Ok(z.finish()?.into_inner())
+}
+
+fn to_book(r: Rendered) -> Result<Book> {
+    let Rendered { title: name, chapters } = r;
     let mut files: HashMap<String, Vec<u8>> = HashMap::new();
     let mut manifest = Vec::new();
     let mut spine = Vec::new();

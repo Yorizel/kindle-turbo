@@ -44,6 +44,11 @@ struct Cli {
     #[arg(long)]
     offline: bool,
 
+    /// Modo `KOReader`: manhwa vira CBZ com páginas do tamanho da tela; EPUB é copiado
+    /// como está. Com --kindle, vai para `documents/Lendo`.
+    #[arg(long)]
+    koreader: bool,
+
     /// Só verifica arquivos AZW3 (decodifica tudo e mostra um resumo)
     #[arg(long)]
     check: bool,
@@ -128,6 +133,9 @@ fn convert_one(input: &Path, cli: &Cli, cover: Option<&Vec<u8>>, out_dir: &Path,
             }
         }
         return Ok(Done { input: input.to_path_buf(), out: path, secs: t.elapsed().as_secs_f64(), size: data.len(), warnings });
+    }
+    if cli.koreader {
+        return koreader_one(input, cli, out_dir, kindle, t);
     }
     let ends_with = |ext: &str| lower.ends_with(ext);
     let book = if input.is_dir() || ends_with(".cbz") || (ends_with(".zip") && !is_epub_zip(input)) {
@@ -237,4 +245,29 @@ fn check(inputs: &[PathBuf]) {
     if bad > 0 {
         std::process::exit(1);
     }
+}
+
+fn is_comic(input: &Path) -> bool {
+    let ext = input.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+    input.is_dir() || ext.as_deref() == Some("cbz") || (ext.as_deref() == Some("zip") && !is_epub_zip(input))
+}
+
+/// `KOReader` reads EPUB and CBZ natively: copy EPUBs, pre-render comics.
+fn koreader_one(input: &Path, cli: &Cli, out_dir: &Path, kindle: Option<&Path>, t: Instant) -> Result<Done> {
+    let (name, data) = if is_comic(input) {
+        let rendered = comic::render(input, cli.title.as_deref())?;
+        (format!("{}.cbz", sanitize(&rendered.title)), comic::to_cbz(&rendered)?)
+    } else {
+        let data = std::fs::read(input).with_context(|| format!("lendo {}", input.display()))?;
+        let title = cli.title.clone().map_or_else(|| epub::open(&data).map(|b| b.meta.title), Ok)?;
+        (format!("{}.epub", sanitize(&title)), data)
+    };
+    let path = out_dir.join(&name);
+    std::fs::write(&path, &data).with_context(|| format!("gravando {}", path.display()))?;
+    if let Some(k) = kindle {
+        let dir = k.join("documents").join("Lendo");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join(&name), &data)?;
+    }
+    Ok(Done { input: input.to_path_buf(), out: path, secs: t.elapsed().as_secs_f64(), size: data.len(), warnings: Vec::new() })
 }

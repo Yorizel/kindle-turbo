@@ -96,3 +96,31 @@ fn empty_folder_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     assert!(comic::open(dir.path(), None).is_err());
 }
+
+#[test]
+fn cbz_for_koreader_keeps_order_and_screen_size() {
+    let dir = tempfile::tempdir().unwrap();
+    for ch in ["Cap 2", "Cap 1"] {
+        std::fs::create_dir(dir.path().join(ch)).unwrap();
+        let img = webtoon_strip(800, 4000, &[(100, 1200), (1500, 2600), (2900, 3900)]);
+        std::fs::write(dir.path().join(ch).join("01.png"), encode(&img, ImageFormat::Png)).unwrap();
+    }
+    let r = comic::render(dir.path(), Some("Meu Manhwa")).unwrap();
+    let cbz = comic::to_cbz(&r).unwrap();
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(cbz)).unwrap();
+    let names: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().unwrap().to_string()).collect();
+    assert!(names[0].starts_with("001 Cap 1/"), "{names:?}");
+    assert!(names.iter().any(|n| n.starts_with("002 Cap 2/")));
+    assert_eq!(names.last().map(String::as_str), Some("ComicInfo.xml"));
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(sorted, names, "zip order must equal lexical order");
+    for i in 0..z.len() - 1 {
+        let mut f = z.by_index(i).unwrap();
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut f, &mut buf).unwrap();
+        let img = image::load_from_memory(&buf).unwrap();
+        assert_eq!(img.width(), comic::PAGE_W);
+        assert!(img.height() <= comic::PAGE_H);
+    }
+}

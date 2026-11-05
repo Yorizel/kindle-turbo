@@ -56,6 +56,7 @@ Opções:
 | `--no-compress` | não comprime o texto |
 | `--offline` | não busca capa na internet |
 | `--check` | só verifica arquivos AZW3 |
+| `--koreader` | para KOReader: manhwa vira CBZ com páginas do tamanho da tela (vira com toque/deslize), EPUB vai como está; com `--kindle` cai em `documents/Lendo` |
 
 Depois de usar `--kindle`, ejete antes de desconectar:
 
@@ -69,7 +70,7 @@ udisksctl unmount -b /dev/disk/by-label/Kindle && udisksctl power-off -b /dev/di
 - Clippy `all` + `pedantic` + `nursery` + `cargo` + regras de `restriction` (sem `unwrap`/`expect`/`panic` fora de testes), tudo como erro. Zero `#[allow]` no código de produção.
 - Compressão PalmDOC com parsing ótimo (programação dinâmica), não gulosa.
 - Testes sem mock: EPUBs e imagens reais gerados no teste, convertidos e decodificados de volta pelo leitor KF8 próprio; testes de propriedade (proptest) na compressão; o binário real é executado nos testes de CLI. Testes com livros reais e com o AniList de verdade: `cargo test -- --ignored`.
-- CI no GitHub Actions: `fmt`, `clippy -D warnings`, testes.
+- CI local: `./ci.sh` (fmt, clippy `-D warnings`, testes) e `./ci.sh --full` (inclui livros reais e AniList). O mesmo roda no GitHub Actions.
 
 ## Limitações
 
