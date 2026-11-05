@@ -17,6 +17,7 @@ const CHUNK_SIZE: usize = 8192;
 pub struct Options {
     pub cover: Option<Vec<u8>>,
     pub compress: bool,
+    pub fetch_cover: bool,
 }
 
 pub struct Output {
@@ -44,7 +45,26 @@ fn build_resources(book: &Book, opts: &Options, warnings: &mut Vec<String>) -> R
         .filter_map(|m| book.files.get(&m.href).map(|d| (m.href.clone(), d.as_slice())))
         .collect();
     let mut cover_href = book.cover.clone();
-    if let Some(c) = &opts.cover {
+    let generated = if opts.cover.is_none() && cover_href.is_none() {
+        let author = book.meta.authors.iter().find(|a| {
+            let l = a.trim().to_lowercase();
+            !l.is_empty() && l != "<unknown>" && l != "unknown"
+        });
+        let fetched = if opts.fetch_cover { crate::fetchcover::find(&book.meta.title, author.map(String::as_str), false) } else { None };
+        if let Some((d, src)) = fetched {
+            warnings.push(format!("EPUB sem capa: capa baixada do {src}"));
+            Some(d)
+        } else {
+            let g = crate::covergen::generate(&book.meta.title, author.map(String::as_str));
+            if g.is_some() {
+                warnings.push("EPUB sem capa: capa gerada com o título (use --cover para escolher outra)".into());
+            }
+            g
+        }
+    } else {
+        None
+    };
+    if let Some(c) = opts.cover.as_ref().or(generated.as_ref()) {
         match &cover_href {
             Some(h) => {
                 if let Some(slot) = items.iter_mut().find(|(k, _)| k == h) {

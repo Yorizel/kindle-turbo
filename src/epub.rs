@@ -235,6 +235,31 @@ pub fn open(bytes: &[u8]) -> Result<Book> {
     if cover.is_none() {
         cover = manifest.iter().find(|m| m.properties.split_whitespace().any(|p| p == "cover-image")).map(|m| m.href.clone());
     }
+    let valid_image = |h: &str| files.get(h).is_some_and(|d| image::guess_format(d).is_ok());
+    if cover.as_deref().is_some_and(|c| !valid_image(c)) {
+        warnings.push("capa declarada no EPUB não é uma imagem válida".into());
+        cover = None;
+    }
+    if cover.is_none() {
+        // cover page: guide type=cover, or first spine page; use its single image
+        let mut pages: Vec<String> = guide.iter().filter(|g| g.typ.eq_ignore_ascii_case("cover")).map(|g| g.href.split('#').next().unwrap_or("").to_string()).collect();
+        pages.extend(spine.first().cloned());
+        for p in pages {
+            let Some(data) = files.get(&p) else { continue };
+            let d = Doc::parse(data);
+            let imgs: Vec<String> = d
+                .descendants(d.root)
+                .into_iter()
+                .filter(|&n| matches!(d.nodes[n].name.as_str(), "img" | "image"))
+                .filter_map(|n| d.attr(n, "src").or(d.attr(n, "href")).map(|s| resolve_href(dirname(&p), s).0))
+                .collect();
+            let text_len = d.text_content(d.root).trim().chars().count();
+            if imgs.len() == 1 && text_len < 300 && valid_image(&imgs[0]) {
+                cover = Some(imgs[0].clone());
+                break;
+            }
+        }
+    }
 
     // TOC: prefer NCX, then EPUB3 nav
     let mut toc = Vec::new();

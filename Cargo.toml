@@ -6,16 +6,22 @@ license = "GPL-3.0-or-later"
 description = "Conversor EPUB/manhwa para AZW3 (Kindle) ultra rapido"
 
 [dependencies]
+ab_glyph = "0.2.32"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 html-escape = "0.3.0"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
 jpeg-encoder = "0.7.1"
 memchr = "2.8.3"
+mimalloc = "0.1.52"
+oxipng = { version = "10.2.1", default-features = false, features = ["parallel"] }
 percent-encoding = "2.3.2"
 quick-xml = "0.42.0"
 rayon = "1.12.0"
 regex = "1.13.1"
+rustc-hash = "2.1.3"
+serde_json = "1.0.154"
+ureq = { version = "3.5.1", features = ["json"] }
 zip = { version = "9.3.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [profile.release]
@@ -23,3 +29,43 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
+
+[dev-dependencies]
+proptest = "1.12.0"
+tempfile = "3.27.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "deny"
+unused_qualifications = "deny"
+unused_lifetimes = "deny"
+unreachable_pub = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+# restriction picks
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+mem_forget = "deny"
+clone_on_ref_ptr = "deny"
+rc_buffer = "deny"
+str_to_string = "deny"
+string_to_string = "deny"
+verbose_file_reads = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+unneeded_field_pattern = "deny"
+semicolon_inside_block = "deny"
+redundant_type_annotations = "deny"
+if_then_some_else_none = "deny"
+get_unwrap = "deny"
+lossy_float_literal = "deny"
+# dependency tree has duplicate transitive versions we do not control
+multiple_crate_versions = "allow"

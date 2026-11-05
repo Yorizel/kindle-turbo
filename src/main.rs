@@ -1,11 +1,10 @@
-mod comic;
-mod dom;
-mod epub;
-mod images;
-mod kf8;
-mod mobi;
-mod palmdoc;
-mod passthrough;
+#![forbid(unsafe_code)]
+
+use kindle_turbo::{comic, epub, images, kf8, passthrough, reader};
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
@@ -40,6 +39,14 @@ struct Cli {
     /// Não comprimir o texto (arquivo maior, conversão um pouco mais rápida)
     #[arg(long)]
     no_compress: bool,
+
+    /// Não buscar capa na internet quando o EPUB não tiver
+    #[arg(long)]
+    offline: bool,
+
+    /// Só verifica arquivos AZW3 (decodifica tudo e mostra um resumo)
+    #[arg(long)]
+    check: bool,
 
     /// Número de threads (padrão: todos os núcleos)
     #[arg(short, long)]
@@ -129,7 +136,7 @@ fn convert_one(input: &Path, cli: &Cli, cover: Option<&Vec<u8>>, out_dir: &Path,
         }
         b
     };
-    let out = kf8::convert(&book, &kf8::Options { cover: cover.cloned(), compress: !cli.no_compress })?;
+    let out = kf8::convert(&book, &kf8::Options { cover: cover.cloned(), compress: !cli.no_compress, fetch_cover: !cli.offline })?;
     let name = format!("{}.azw3", sanitize(&out.title));
     let path = out_dir.join(&name);
     std::fs::write(&path, &out.data).with_context(|| format!("gravando {}", path.display()))?;
@@ -159,6 +166,9 @@ fn main() -> Result<()> {
         rayon::ThreadPoolBuilder::new().num_threads(j).build_global().ok();
     }
     let total = Instant::now();
+    if cli.check {
+        return check(&cli.inputs);
+    }
     std::fs::create_dir_all(&cli.out)?;
     let cover = match &cli.cover {
         Some(p) => Some(std::fs::read(p).with_context(|| format!("lendo capa {}", p.display()))?),
@@ -197,6 +207,32 @@ fn main() -> Result<()> {
     }
     println!("total: {:.2}s", total.elapsed().as_secs_f64());
     if failed > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn check(inputs: &[PathBuf]) -> Result<()> {
+    let mut bad = 0;
+    for p in inputs {
+        let res = std::fs::read(p).map_err(anyhow::Error::from).and_then(|d| reader::read(&d));
+        match res {
+            Ok(b) => println!(
+                "ok   {}: \"{}\", {} arquivos, {} entradas no sumário, {:.1} MB de texto, capa: {}",
+                p.display(),
+                b.title,
+                b.files.len(),
+                b.toc.len(),
+                b.text.len() as f64 / 1e6,
+                if b.exth_u32(201).is_some() { "sim" } else { "não" }
+            ),
+            Err(e) => {
+                bad += 1;
+                println!("ERRO {}: {e:#}", p.display());
+            }
+        }
+    }
+    if bad > 0 {
         std::process::exit(1);
     }
     Ok(())
