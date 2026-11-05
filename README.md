@@ -1,0 +1,74 @@
+# kindle-turbo
+
+Conversor EPUB / manhwa → AZW3 (Kindle) escrito em Rust. Usa todos os núcleos do processador.
+
+| Livro | Calibre | kindle-turbo |
+|---|---|---|
+| Lord of the Mysteries (1432 caps, 328 ilustrações) | 12 min 51 s, 517 MB | **2,7 s, 86 MB** |
+| Pursuit of the Truth (1506 caps) | 3 min 39 s | **1,1 s** |
+| The Second Coming of Gluttony | 2 min 17 s | **2,5 s** |
+| 7 livros de uma vez | ~13 min | **2,7 s** |
+
+Medido num processador de 28 threads. O texto convertido foi conferido com o leitor do próprio Calibre: mesma contagem de palavras do EPUB original.
+
+## O que faz
+
+- **EPUB → AZW3 (KF8)**: arquivo único, sumário (NCX), links internos, capa, CSS, ilustrações. Cada capítulo, imagem e registro de texto é processado em paralelo.
+- **Manhwa / webtoon / mangá**: pasta de imagens (uma subpasta por capítulo) ou `.cbz`. A tira longa é emendada e recortada em páginas do tamanho da tela (1236×1648), cortando de preferência em faixas em branco para não partir balões. Capítulos viram o sumário, em ordem natural (Cap 2 antes de Cap 10).
+- **Capa na biblioteca do Kindle**: livros copiados por USB costumam aparecer sem capa. Com `--kindle`, o programa grava também a miniatura em `system/thumbnails/`, que é onde o Kindle procura.
+- **AZW3/MOBI prontos**: são copiados como estão, com a capa extraída para a biblioteca.
+- **Capa personalizada**: `--cover imagem.jpg`.
+- Imagens WebP/BMP viram JPEG ajustado à tela; JPEG/PNG/GIF passam sem recompressão.
+
+## Instalar
+
+```sh
+cargo install --path .
+```
+
+## Usar
+
+```sh
+# converte e salva na pasta atual
+kindle-turbo livro.epub
+
+# vários livros de uma vez, direto para o Kindle conectado por USB (com capa)
+kindle-turbo --kindle ~/Downloads/*.epub
+
+# manhwa a partir de uma pasta (Cap 1/, Cap 2/, ...)
+kindle-turbo --kindle -t "Solo Leveling" ~/manhwa/solo-leveling/
+
+# manhwa em .cbz com capa própria
+kindle-turbo --kindle --cover capa.jpg volume1.cbz
+```
+
+Opções:
+
+| Opção | |
+|---|---|
+| `-o, --out DIR` | pasta de saída (padrão: atual) |
+| `-k, --kindle` | copia para o Kindle montado em `/run/media/$USER/Kindle` e grava a capa da biblioteca |
+| `-c, --cover IMG` | capa personalizada |
+| `-t, --title T` | título (use com uma entrada só) |
+| `-j, --jobs N` | limita o número de threads |
+| `--no-compress` | não comprime o texto |
+
+Depois de usar `--kindle`, ejete antes de desconectar:
+
+```sh
+udisksctl unmount -b /dev/disk/by-label/Kindle && udisksctl power-off -b /dev/disk/by-label/Kindle
+```
+
+## Limitações
+
+- Fontes embutidas no EPUB são ignoradas (o Kindle usa as dele).
+- CBR (RAR) não é suportado; converta para CBZ.
+- O formato KF8 foi portado do writer8 do Calibre (GPLv3), por isso este projeto também é GPLv3.
+
+## Como funciona
+
+1. Lê o EPUB inteiro na memória, descompactando as entradas em paralelo.
+2. Processa o XHTML de cada capítulo em paralelo: links de imagem viram `kindle:embed`, CSS vira `kindle:flow`, atributos `aid` para âncoras.
+3. Divide cada arquivo em esqueleto + fragmentos de até 8 KB (formato KF8), em paralelo.
+4. Comprime os registros de texto de 4 KB com PalmDoc, em paralelo.
+5. Gera os índices SKEL, FRAG, NCX e guia, os trailing byte sequences, o cabeçalho EXTH e o contêiner PalmDB.
