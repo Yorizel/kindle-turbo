@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use kindle_turbo::{comic, epub, images, kf8, passthrough, pdf, reader};
+use kindle_turbo::{comic, epub, images, kf8, passthrough, reader};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -44,8 +44,8 @@ struct Cli {
     #[arg(long)]
     offline: bool,
 
-    /// Modo `KOReader`: manhwa vira um PDF só (páginas do tamanho da tela, marcador por
-    /// capítulo) em `documents/Manhwas`; EPUB vai como está para `documents/Novels`.
+    /// Modo `KOReader`: manhwa vira um CBZ por capítulo em `documents/Manhwas/<Série>`;
+    /// EPUB vai como está para `documents/Novels`.
     #[arg(long)]
     koreader: bool,
 
@@ -254,22 +254,38 @@ fn is_comic(input: &Path) -> bool {
 
 /// `KOReader` reads EPUB and CBZ natively: copy EPUBs, pre-render comics.
 fn koreader_one(input: &Path, cli: &Cli, out_dir: &Path, kindle: Option<&Path>, t: Instant) -> Result<Done> {
-    // manhwa: one PDF per series with a bookmark per chapter -> documents/Manhwas
-    // novel: the EPUB as-is -> documents/Novels
-    let (folder, name, data) = if is_comic(input) {
+    // manhwa -> documents/Manhwas/<Série>/<Capítulo>.cbz (one file per chapter)
+    // novel  -> documents/Novels/<Título>.epub (as-is)
+    let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    if is_comic(input) {
         let rendered = comic::render(input, cli.title.as_deref())?;
-        ("Manhwas", format!("{}.pdf", sanitize(&rendered.title)), pdf::to_pdf(&rendered)?)
+        let series = sanitize(&rendered.title);
+        let single = rendered.chapters.len() == 1;
+        for ch in rendered.chapters.iter().filter(|c| !c.pages.is_empty()) {
+            let rel = if single {
+                PathBuf::from("Manhwas").join(format!("{series}.cbz"))
+            } else {
+                PathBuf::from("Manhwas").join(&series).join(format!("{}.cbz", sanitize(&ch.title)))
+            };
+            files.push((rel, comic::chapter_cbz(&rendered.title, ch)?));
+        }
     } else {
         let data = std::fs::read(input).with_context(|| format!("lendo {}", input.display()))?;
         let title = cli.title.clone().map_or_else(|| epub::open(&data).map(|b| b.meta.title), Ok)?;
-        ("Novels", format!("{}.epub", sanitize(&title)), data)
-    };
-    let path = out_dir.join(&name);
-    std::fs::write(&path, &data).with_context(|| format!("gravando {}", path.display()))?;
-    if let Some(k) = kindle {
-        let dir = k.join("documents").join(folder);
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join(&name), &data)?;
+        files.push((PathBuf::from("Novels").join(format!("{}.epub", sanitize(&title))), data));
     }
-    Ok(Done { input: input.to_path_buf(), out: path, secs: t.elapsed().as_secs_f64(), size: data.len(), warnings: Vec::new() })
+    let mut size = 0;
+    for (rel, data) in &files {
+        for root in std::iter::once(out_dir.to_path_buf()).chain(kindle.map(|k| k.join("documents"))) {
+            let path = root.join(rel);
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&path, data).with_context(|| format!("gravando {}", path.display()))?;
+        }
+        size += data.len();
+    }
+    let out = files.first().map_or_else(|| out_dir.to_path_buf(), |(rel, _)| out_dir.join(rel));
+    let out = if files.len() > 1 { out.parent().map_or_else(|| out.clone(), Path::to_path_buf) } else { out };
+    Ok(Done { input: input.to_path_buf(), out, secs: t.elapsed().as_secs_f64(), size, warnings: Vec::new() })
 }

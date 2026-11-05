@@ -3,7 +3,9 @@
 //! Optional sub-folders become chapters. Long strips are stitched and re-cut into
 //! screen-sized pages, preferring cuts on blank rows so speech bubbles are not split.
 
+use crate::dom::escape_text;
 use crate::epub::{Book, ManItem, Meta, TocNode};
+use crate::webtoon;
 use anyhow::{Context, Result, anyhow};
 use image::{GrayImage, imageops::FilterType};
 use rayon::prelude::*;
@@ -13,9 +15,9 @@ use std::path::Path;
 
 pub const PAGE_W: u32 = 1236;
 pub const PAGE_H: u32 = 1648;
-/// e-ink shows 16 grey levels; q65 is visually identical there and ~20% smaller than q80
-const JPEG_Q: u8 = 65;
-const BATCH: usize = 48;
+/// e-ink shows 16 grey levels: q55 is indistinguishable there and keeps pages light
+const JPEG_Q: u8 = 55;
+const CHAPTERS_IN_FLIGHT: usize = 4;
 const CSS: &str = "@page{margin:0}body{margin:0;padding:0;text-align:center}img{width:100%;height:auto;margin:0;padding:0;display:block}div{page-break-after:always;margin:0;padding:0}";
 
 /// One input image: its archive or relative path, and the raw bytes.
@@ -151,63 +153,6 @@ fn rows_to_gray(rows: Vec<u8>, width: u32) -> Result<GrayImage> {
     GrayImage::from_raw(width, h, rows).ok_or_else(|| anyhow!("buffer de página inconsistente"))
 }
 
-/// A row is a good cut if it is (almost) a single flat colour.
-fn row_is_flat(buf: &[u8], w: usize, row: usize) -> bool {
-    let r = &buf[row * w..(row + 1) * w];
-    let (mut lo, mut hi) = (255u8, 0u8);
-    for &p in r.iter().step_by(3) {
-        lo = lo.min(p);
-        hi = hi.max(p);
-        if hi - lo > 16 {
-            return false;
-        }
-    }
-    true
-}
-
-/// Best cut row for a page of at most `target` rows: the lowest gutter row in the
-/// bottom half, so panels are not sliced and pages stay full.
-fn find_cut(buf: &[u8], w: usize, h: usize, target: usize) -> usize {
-    if h <= target {
-        return h;
-    }
-    let min = target / 2;
-    let mut row = target;
-    while row > min {
-        if row_is_flat(buf, w, row) && row_is_flat(buf, w, row - 1) && row_is_flat(buf, w, row - 2) {
-            return row;
-        }
-        row -= 1;
-    }
-    target
-}
-
-/// Shrinks runs of flat rows (gutters between panels) to at most `keep` rows.
-fn collapse_gutters(g: &GrayImage, keep: usize) -> Vec<u8> {
-    let w = g.width() as usize;
-    let raw = g.as_raw();
-    let rows = raw.len() / w.max(1);
-    let mut out = Vec::with_capacity(raw.len());
-    let mut run = 0usize;
-    for r in 0..rows {
-        if row_is_flat(raw, w, r) {
-            run += 1;
-            if run > keep {
-                continue;
-            }
-        } else {
-            run = 0;
-        }
-        out.extend_from_slice(&raw[r * w..(r + 1) * w]);
-    }
-    out
-}
-
-fn is_blank(g: &GrayImage) -> bool {
-    let w = g.width() as usize;
-    (0..g.height() as usize).step_by(8).all(|r| row_is_flat(g.as_raw(), w, r))
-}
-
 /// A chapter rendered into screen-sized grayscale JPEG pages.
 #[derive(Debug)]
 pub struct Chapter {
@@ -227,81 +172,71 @@ pub struct Rendered {
     pub chapters: Vec<Chapter>,
 }
 
-/// One decoded input image, already in its final form.
-enum Prepared {
-    /// Part of a long strip: rows of exactly the strip width, gutters collapsed.
-    Strip(Vec<u8>),
-    /// A regular page, fitted to the screen.
-    Page(GrayImage),
-}
-
-/// Strip width: the most common strip width, never upscaled past the screen.
-fn strip_width(images: &[&Entry]) -> u32 {
-    let mut widths: Vec<u32> = images
+/// Image dimensions without decoding pixels.
+fn dims(images: &[&Entry]) -> Vec<(u32, u32)> {
+    images
         .par_iter()
         .filter_map(|(_, d)| image::ImageReader::new(Cursor::new(d)).with_guessed_format().ok()?.into_dimensions().ok())
-        .filter(|&(w, h)| h > w * 19 / 10)
-        .map(|(w, _)| w)
-        .collect();
-    widths.sort_unstable();
-    widths.get(widths.len() / 2).copied().unwrap_or(PAGE_W).min(PAGE_W)
+        .collect()
 }
 
-fn prepare(data: &[u8], width: u32) -> Option<Prepared> {
-    let g = decode_gray(data)?;
-    if g.height() <= g.width() * 19 / 10 {
-        return Some(Prepared::Page(fit_page(g)));
+/// Strip width: the most common image width, never upscaled past the screen.
+fn strip_width(sizes: &[(u32, u32)]) -> u32 {
+    let mut counts: HashMap<u32, usize> = HashMap::new();
+    for &(w, _) in sizes {
+        *counts.entry(w).or_default() += 1;
     }
-    let g = if g.width() > width || g.width() < width { scale_to_width(g, width) } else { g };
-    // keep ~2.5% of the page height of white between panels
-    let keep = (width as usize * PAGE_H as usize / PAGE_W as usize) / 40;
-    Some(Prepared::Strip(collapse_gutters(&g, keep.max(8))))
+    counts.into_iter().max_by_key(|&(w, c)| (c, w)).map_or(PAGE_W, |(w, _)| w).min(PAGE_W)
 }
 
-/// Stream images of one chapter into screen pages.
+/// A chapter is a long strip when its images are tall (median height > 1.8 x width; manga pages are ~1.4-1.5).
+fn is_strip(sizes: &[(u32, u32)]) -> bool {
+    let mut ratios: Vec<u64> = sizes.iter().map(|&(w, h)| u64::from(h) * 100 / u64::from(w.max(1))).collect();
+    ratios.sort_unstable();
+    ratios.get(ratios.len() / 2).is_some_and(|&r| r > 180)
+}
+
+/// Manga / comic pages: one image per page, fitted to the screen.
+fn render_pages(images: &[&Entry]) -> Result<Vec<Vec<u8>>> {
+    images
+        .par_iter()
+        .filter_map(|(_, d)| decode_gray(d))
+        .map(|g| {
+            let mut g = fit_page(g);
+            webtoon::autocontrast(&mut g);
+            encode_gray(&g)
+        })
+        .collect()
+}
+
+/// Render one chapter: long strips are stitched into a single strip and laid
+/// out panel by panel (see [`webtoon`]); regular pages are fitted one by one.
 fn render_chapter(images: &[&Entry]) -> Result<Vec<Vec<u8>>> {
-    let width = strip_width(images);
-    let w = width as usize;
-    // page height for this width, keeping the screen aspect ratio
-    let target = w * PAGE_H as usize / PAGE_W as usize;
-    let mut pages: Vec<GrayImage> = Vec::new();
-    let mut out: Vec<Vec<u8>> = Vec::new();
-    let mut carry: Vec<u8> = Vec::new();
-    for batch in images.chunks(BATCH) {
-        let prepared: Vec<Option<Prepared>> = batch.par_iter().map(|(_, d)| prepare(d, width)).collect();
-        for p in prepared.into_iter().flatten() {
-            match p {
-                Prepared::Page(g) => {
-                    if !carry.is_empty() {
-                        pages.push(rows_to_gray(std::mem::take(&mut carry), width)?);
-                    }
-                    pages.push(g);
-                }
-                Prepared::Strip(rows) => {
-                    carry.extend_from_slice(&rows);
-                    loop {
-                        let h = carry.len() / w;
-                        if h < target {
-                            break;
-                        }
-                        let cut = find_cut(&carry, w, h, target);
-                        let rest = carry.split_off(cut * w);
-                        pages.push(rows_to_gray(std::mem::replace(&mut carry, rest), width)?);
-                    }
-                }
-            }
-        }
-        let ready: Vec<GrayImage> = std::mem::take(&mut pages);
-        let encoded: Vec<Vec<u8>> = ready.into_par_iter().filter(|p| !is_blank(p)).map(|p| encode_gray(&p)).collect::<Result<_>>()?;
-        out.extend(encoded);
+    let sizes = dims(images);
+    if !is_strip(&sizes) {
+        return render_pages(images);
     }
-    if carry.len() / w > 40 {
-        let g = rows_to_gray(carry, width)?;
-        if !is_blank(&g) {
-            out.push(encode_gray(&g)?);
-        }
+    let width = strip_width(&sizes);
+    let w = usize::try_from(width)?;
+    // decode, grey and scale every image in parallel, then stitch in order
+    let parts: Vec<GrayImage> = images.par_iter().filter_map(|(_, d)| decode_gray(d).map(|g| scale_to_width(g, width))).collect();
+    let mut strip = Vec::with_capacity(parts.iter().map(|g| g.as_raw().len()).sum());
+    for g in parts {
+        strip.extend_from_slice(g.as_raw());
     }
-    Ok(out)
+    webtoon::autocontrast(&mut strip);
+    let params = webtoon::Params::for_width(w, PAGE_W as usize, PAGE_H as usize);
+    let quiet = webtoon::quiet_rows(&strip, w, params.edge_threshold);
+    let panels = webtoon::panels(&quiet, params.min_gutter);
+    let pages = webtoon::layout(&panels, &params);
+    let bg = webtoon::background(&strip, w);
+    pages
+        .par_iter()
+        .map(|page| {
+            let raw = webtoon::compose(&strip, page, &params, bg);
+            encode_gray(&rows_to_gray(raw, width)?)
+        })
+        .collect()
 }
 
 /// Reads a manhwa folder or CBZ and builds an EPUB book model with one image per screen page.
@@ -329,19 +264,25 @@ pub fn render(input: &Path, title: Option<&str>) -> Result<Rendered> {
         }
     }
     let multi = chapters_raw.len() > 1;
-    let chapters: Vec<Chapter> = chapters_raw
-        .par_iter()
-        .with_max_len(1)
-        .enumerate()
-        .map(|(i, (dir, imgs))| -> Result<Chapter> {
-            let title = if multi {
-                dir.rsplit('/').next().filter(|s| !s.is_empty()).map_or_else(|| format!("Capítulo {}", i + 1), str::to_owned)
-            } else {
-                "Início".to_owned()
-            };
-            Ok(Chapter { title, pages: render_chapter(imgs)? })
-        })
-        .collect::<Result<_>>()?;
+    // a stitched chapter can take a few hundred MB: render a few at a time,
+    // each one already uses every core internally
+    let mut chapters: Vec<Chapter> = Vec::with_capacity(chapters_raw.len());
+    for (g, group) in chapters_raw.chunks(CHAPTERS_IN_FLIGHT).enumerate() {
+        let done: Vec<Chapter> = group
+            .par_iter()
+            .enumerate()
+            .map(|(k, (dir, imgs))| -> Result<Chapter> {
+                let i = g * CHAPTERS_IN_FLIGHT + k;
+                let title = if multi {
+                    dir.rsplit('/').next().filter(|s| !s.is_empty()).map_or_else(|| format!("Capítulo {}", i + 1), str::to_owned)
+                } else {
+                    "Início".to_owned()
+                };
+                Ok(Chapter { title, pages: render_chapter(imgs)? })
+            })
+            .collect::<Result<_>>()?;
+        chapters.extend(done);
+    }
 
     let name = title.map_or_else(|| input.file_stem().map_or_else(|| "Manhwa".into(), |s| s.to_string_lossy().into_owned()), str::to_owned);
     if chapters.iter().all(|c| c.pages.is_empty()) {
@@ -350,30 +291,28 @@ pub fn render(input: &Path, title: Option<&str>) -> Result<Rendered> {
     Ok(Rendered { title: name, chapters })
 }
 
-/// Package rendered pages as a CBZ (stored, no recompression), one folder per
-/// chapter so `KOReader` keeps the order and shows chapter boundaries.
+/// Package one chapter as a CBZ (stored: JPEGs are already compressed).
 ///
 /// # Errors
 /// Only fails on an internal zip write error.
-pub fn to_cbz(r: &Rendered) -> Result<Vec<u8>> {
+pub fn chapter_cbz(series: &str, chapter: &Chapter) -> Result<Vec<u8>> {
     use std::io::Write as _;
     let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    let mut n = 0usize;
-    for (ci, ch) in r.chapters.iter().enumerate() {
-        let folder: String = ch.title.chars().map(|c| if matches!(c, '/' | '\\') { '_' } else { c }).collect();
-        for p in &ch.pages {
-            n += 1;
-            z.start_file(format!("{:03} {folder}/{n:05}.jpg", ci + 1), opts)?;
-            z.write_all(p)?;
-        }
+    for (n, p) in chapter.pages.iter().enumerate() {
+        z.start_file(format!("{:04}.jpg", n + 1), opts)?;
+        z.write_all(p)?;
     }
     z.start_file("ComicInfo.xml", opts)?;
-    let mut title = Vec::new();
-    crate::dom::escape_text(&r.title, &mut title);
-    z.write_all(b"<?xml version=\"1.0\"?><ComicInfo><Title>")?;
-    z.write_all(&title)?;
-    write!(z, "</Title><PageCount>{n}</PageCount><Manga>No</Manga></ComicInfo>")?;
+    let mut series_x = Vec::new();
+    escape_text(series, &mut series_x);
+    let mut title_x = Vec::new();
+    escape_text(&chapter.title, &mut title_x);
+    z.write_all(b"<?xml version=\"1.0\"?><ComicInfo><Series>")?;
+    z.write_all(&series_x)?;
+    z.write_all(b"</Series><Title>")?;
+    z.write_all(&title_x)?;
+    write!(z, "</Title><PageCount>{}</PageCount><Manga>No</Manga></ComicInfo>", chapter.pages.len())?;
     Ok(z.finish()?.into_inner())
 }
 

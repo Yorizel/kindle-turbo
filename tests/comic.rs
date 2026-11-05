@@ -99,7 +99,7 @@ fn empty_folder_is_an_error() {
 }
 
 #[test]
-fn cbz_for_koreader_keeps_order_and_screen_size() {
+fn chapter_cbz_pages_in_order_with_same_size() {
     let dir = tempfile::tempdir().unwrap();
     for ch in ["Cap 2", "Cap 1"] {
         std::fs::create_dir(dir.path().join(ch)).unwrap();
@@ -107,73 +107,32 @@ fn cbz_for_koreader_keeps_order_and_screen_size() {
         std::fs::write(dir.path().join(ch).join("01.png"), encode(&img, ImageFormat::Png)).unwrap();
     }
     let r = comic::render(dir.path(), Some("Meu Manhwa")).unwrap();
-    let cbz = comic::to_cbz(&r).unwrap();
+    assert_eq!(r.chapters.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Cap 1", "Cap 2"]);
+    let cbz = comic::chapter_cbz(&r.title, &r.chapters[0]).unwrap();
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(cbz)).unwrap();
     let names: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().unwrap().to_string()).collect();
-    assert!(names[0].starts_with("001 Cap 1/"), "{names:?}");
-    assert!(names.iter().any(|n| n.starts_with("002 Cap 2/")));
     assert_eq!(names.last().map(String::as_str), Some("ComicInfo.xml"));
-    let mut sorted = names.clone();
-    sorted.sort();
-    assert_eq!(sorted, names, "zip order must equal lexical order");
-    for i in 0..z.len() - 1 {
+    let mut sizes = std::collections::HashSet::new();
+    for (i, name) in names.iter().enumerate().take(z.len() - 1) {
+        assert_eq!(name, &format!("{:04}.jpg", i + 1));
         let mut f = z.by_index(i).unwrap();
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut buf).unwrap();
         let img = image::load_from_memory(&buf).unwrap();
-        assert_eq!(img.width(), 800);
-        assert!(img.height() <= 800 * comic::PAGE_H / comic::PAGE_W);
+        sizes.insert((img.width(), img.height()));
     }
+    // every page has the same size: no zoom jumps between pages
+    assert_eq!(sizes.len(), 1, "{sizes:?}");
+    assert_eq!(sizes.into_iter().next().unwrap(), (800, 800 * comic::PAGE_H / comic::PAGE_W));
 }
 
 #[test]
 fn gutters_are_collapsed_so_pages_are_few() {
     let dir = tempfile::tempdir().unwrap();
     // two panels separated by a huge 3000 px white gap
-    let img = webtoon_strip(800, 5000, &[(0, 900), (3900, 4900)]);
+    let img = webtoon_strip(800, 5000, &[(0, 400), (4500, 4900)]);
     std::fs::write(dir.path().join("1.png"), encode(&img, ImageFormat::Png)).unwrap();
     let r = comic::render(dir.path(), None).unwrap();
     let pages: usize = r.chapters.iter().map(|c| c.pages.len()).sum();
-    assert!(pages <= 2, "white gap must not become pages: {pages}");
-}
-
-#[test]
-fn pdf_has_one_page_per_image_and_chapter_bookmarks() {
-    let dir = tempfile::tempdir().unwrap();
-    for ch in ["Cap 10", "Cap 9"] {
-        std::fs::create_dir(dir.path().join(ch)).unwrap();
-        let img = webtoon_strip(720, 6000, &[(100, 1500), (1700, 3200), (3400, 5900)]);
-        std::fs::write(dir.path().join(ch).join("001.img"), encode(&img, ImageFormat::WebP)).unwrap();
-    }
-    let r = comic::render(dir.path(), Some("Série Ç")).unwrap();
-    let pdf = kindle_turbo::pdf::to_pdf(&r).unwrap();
-    let s = String::from_utf8_lossy(&pdf);
-    let n_pages: usize = r.chapters.iter().map(|c| c.pages.len()).sum();
-    assert_eq!(s.matches("/Type /Page ").count(), n_pages);
-    assert!(s.contains(&format!("/Count {n_pages}")));
-    assert!(s.contains("/Type /Outlines"));
-    // chapter titles in natural order as UTF-16BE hex
-    let hex = |t: &str| {
-        t.encode_utf16().fold(String::new(), |mut acc, u| {
-            std::fmt::Write::write_fmt(&mut acc, format_args!("{u:04X}")).unwrap();
-            acc
-        })
-    };
-    let p9 = s.find(&hex("Cap 9")).unwrap();
-    let p10 = s.find(&hex("Cap 10")).unwrap();
-    assert!(p9 < p10);
-    assert!(s.ends_with("%%EOF\n"));
-    // xref offsets point at real objects
-    let xref = s.rfind("xref\n").unwrap();
-    for line in s[xref..].lines().skip(3).take_while(|l| l.ends_with(" n ")) {
-        let off: usize = line[..10].parse().unwrap();
-        assert!(s[off..].starts_with(|c: char| c.is_ascii_digit()) && s[off..off + 20].contains(" 0 obj"));
-    }
-    if std::process::Command::new("pdfinfo").arg("-v").output().is_ok() {
-        let f = dir.path().join("x.pdf");
-        std::fs::write(&f, &pdf).unwrap();
-        let out = std::process::Command::new("pdfinfo").arg(&f).output().unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        assert!(String::from_utf8_lossy(&out.stdout).contains(&format!("Pages:           {n_pages}")));
-    }
+    assert_eq!(pages, 1, "two short panels with a huge gap between them fit one page");
 }
