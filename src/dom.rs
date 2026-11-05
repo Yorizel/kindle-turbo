@@ -24,11 +24,70 @@ pub struct Doc {
 
 /// Tags to which kindlegen adds the aid attribute.
 pub const AID_ABLE: &[&str] = &[
-    "a", "abbr", "address", "article", "aside", "audio", "b", "bdo", "blockquote", "body", "button", "cite",
-    "code", "dd", "del", "details", "dfn", "div", "dl", "dt", "em", "fieldset", "figcaption", "figure",
-    "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "i", "ins", "kbd", "label", "legend",
-    "li", "map", "mark", "meter", "nav", "ol", "output", "p", "pre", "progress", "q", "rp", "rt", "samp",
-    "section", "select", "small", "span", "strong", "sub", "summary", "sup", "textarea", "time", "ul", "var",
+    "a",
+    "abbr",
+    "address",
+    "article",
+    "aside",
+    "audio",
+    "b",
+    "bdo",
+    "blockquote",
+    "body",
+    "button",
+    "cite",
+    "code",
+    "dd",
+    "del",
+    "details",
+    "dfn",
+    "div",
+    "dl",
+    "dt",
+    "em",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hgroup",
+    "i",
+    "ins",
+    "kbd",
+    "label",
+    "legend",
+    "li",
+    "map",
+    "mark",
+    "meter",
+    "nav",
+    "ol",
+    "output",
+    "p",
+    "pre",
+    "progress",
+    "q",
+    "rp",
+    "rt",
+    "samp",
+    "section",
+    "select",
+    "small",
+    "span",
+    "strong",
+    "sub",
+    "summary",
+    "sup",
+    "textarea",
+    "time",
+    "ul",
+    "var",
     "video",
 ];
 
@@ -51,11 +110,7 @@ fn local<T: AsRef<[u8]> + ?Sized>(name: &T) -> String {
 
 #[must_use]
 pub fn decode_entities(raw: &str) -> String {
-    if raw.contains('&') {
-        html_escape::decode_html_entities(raw).into_owned()
-    } else {
-        raw.to_owned()
-    }
+    if raw.contains('&') { html_escape::decode_html_entities(raw).into_owned() } else { raw.to_owned() }
 }
 
 impl Doc {
@@ -104,9 +159,8 @@ impl Doc {
                     let raw = String::from_utf8_lossy(AsRef::<[u8]>::as_ref(&*t)).into_owned();
                     doc.append_text(&stack, &raw);
                 }
-                Ok(Event::Eof) => break,
+                Ok(Event::Eof) | Err(_) => break,
                 Ok(_) => {}
-                Err(_) => break,
             }
         }
         if doc.root == NIL {
@@ -115,7 +169,7 @@ impl Doc {
         doc
     }
 
-    fn new_from(&mut self, e: &BytesStart) -> usize {
+    fn new_from(&mut self, e: &BytesStart<'_>) -> usize {
         let name = local(e.name().as_ref());
         let mut attrs: Vec<(String, String)> = Vec::new();
         for a in e.html_attributes().with_checks(false).flatten() {
@@ -202,9 +256,11 @@ impl Doc {
         if p == NIL {
             return;
         }
-        let tail = self.nodes[child].tail.take();
-        let idx = self.nodes[p].children.iter().position(|&c| c == child).unwrap();
-        if let Some(t) = tail {
+        let Some(idx) = self.nodes[p].children.iter().position(|&c| c == child) else {
+            self.remove(child);
+            return;
+        };
+        if let Some(t) = self.nodes[child].tail.take() {
             if idx == 0 {
                 self.nodes[p].text.get_or_insert_with(String::new).push_str(&t);
             } else {
@@ -216,12 +272,15 @@ impl Doc {
     }
 
     /// Replace `old` with `new` (new takes over old's position and tail).
+    /// Does nothing if `old` is not attached to a parent.
     pub fn replace(&mut self, old: usize, new: usize) {
         let p = self.nodes[old].parent;
         if p == NIL {
             return;
         }
-        let idx = self.nodes[p].children.iter().position(|&c| c == old).unwrap();
+        let Some(idx) = self.nodes[p].children.iter().position(|&c| c == old) else {
+            return;
+        };
         self.nodes[p].children[idx] = new;
         self.nodes[new].parent = p;
         self.nodes[new].tail = self.nodes[old].tail.take();
@@ -256,7 +315,6 @@ impl Doc {
     /// Concatenated text content.
     #[must_use]
     pub fn text_content(&self, id: usize) -> String {
-        let mut s = String::new();
         fn rec(d: &Doc, id: usize, s: &mut String) {
             if let Some(t) = &d.nodes[id].text {
                 s.push_str(t);
@@ -268,16 +326,16 @@ impl Doc {
                 }
             }
         }
+        let mut s = String::new();
         rec(self, id, &mut s);
         s
     }
 
     pub fn serialize(&self, id: usize, out: &mut Vec<u8>, with_tail: bool) {
         self.ser(id, out, false);
-        if with_tail
-            && let Some(t) = &self.nodes[id].tail {
-                escape_text(t, out);
-            }
+        if with_tail && let Some(t) = &self.nodes[id].tail {
+            escape_text(t, out);
+        }
     }
 
     pub fn serialize_root(&self, out: &mut Vec<u8>) {

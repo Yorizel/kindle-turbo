@@ -3,6 +3,10 @@ name = "kindle-turbo"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
+repository = "https://github.com/Yorizel/kindle-turbo"
+readme = "README.md"
+keywords = ["kindle", "epub", "azw3", "manhwa", "ebook"]
+categories = ["command-line-utilities", "encoding", "multimedia::images"]
 description = "Conversor EPUB/manhwa para AZW3 (Kindle) ultra rapido"
 
 [dependencies]

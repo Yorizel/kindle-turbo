@@ -5,7 +5,6 @@ use kindle_turbo::{comic, epub, images, kf8, passthrough, reader};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use rayon::prelude::*;
@@ -15,6 +14,7 @@ use std::time::Instant;
 /// Conversor EPUB / manhwa -> AZW3 (Kindle) ultra rápido, usa todos os núcleos.
 #[derive(Parser, Debug)]
 #[command(version, about)]
+#[expect(clippy::struct_excessive_bools, reason = "each bool is an independent CLI switch; the flag names are part of the interface")]
 struct Cli {
     /// Arquivos .epub, .cbz/.zip ou pastas de imagens (manhwa/mangá)
     #[arg(required = true)]
@@ -54,10 +54,7 @@ struct Cli {
 }
 
 fn sanitize(name: &str) -> String {
-    let s: String = name
-        .chars()
-        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
-        .collect();
+    let s: String = name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect();
     let s = s.trim().trim_matches('.').to_owned();
     let s: String = s.chars().take(150).collect();
     if s.is_empty() { "livro".into() } else { s }
@@ -95,6 +92,12 @@ struct Done {
     warnings: Vec<String>,
 }
 
+/// Bytes as megabytes (10^6). Truncating to whole kilobytes first keeps the
+/// result exact at the one-decimal boundaries used for display.
+fn megabytes(bytes: usize) -> f64 {
+    f64::from(u32::try_from(bytes / 1000).unwrap_or(u32::MAX)) / 1e3
+}
+
 fn convert_one(input: &Path, cli: &Cli, cover: Option<&Vec<u8>>, out_dir: &Path, kindle: Option<&Path>) -> Result<Done> {
     let t = Instant::now();
     let lower = input.to_string_lossy().to_lowercase();
@@ -126,13 +129,14 @@ fn convert_one(input: &Path, cli: &Cli, cover: Option<&Vec<u8>>, out_dir: &Path,
         }
         return Ok(Done { input: input.to_path_buf(), out: path, secs: t.elapsed().as_secs_f64(), size: data.len(), warnings });
     }
-    let book =if input.is_dir() || lower.ends_with(".cbz") || (lower.ends_with(".zip") && !is_epub_zip(input)) {
+    let ends_with = |ext: &str| lower.ends_with(ext);
+    let book = if input.is_dir() || ends_with(".cbz") || (ends_with(".zip") && !is_epub_zip(input)) {
         comic::open(input, cli.title.as_deref())?
     } else {
         let bytes = std::fs::read(input).with_context(|| format!("lendo {}", input.display()))?;
         let mut b = epub::open(&bytes)?;
         if let Some(t) = &cli.title {
-            b.meta.title = t.clone();
+            b.meta.title.clone_from(t);
         }
         b
     };
@@ -166,7 +170,8 @@ fn main() -> Result<()> {
     }
     let total = Instant::now();
     if cli.check {
-        return check(&cli.inputs);
+        check(&cli.inputs);
+        return Ok(());
     }
     std::fs::create_dir_all(&cli.out)?;
     let cover = match &cli.cover {
@@ -175,17 +180,14 @@ fn main() -> Result<()> {
     };
     let kindle = if cli.kindle { Some(find_kindle()?) } else { None };
 
-    let results: Vec<(PathBuf, Result<Done>)> = cli
-        .inputs
-        .par_iter()
-        .map(|i| (i.clone(), convert_one(i, &cli, cover.as_ref(), &cli.out, kindle.as_deref())))
-        .collect();
+    let results: Vec<(PathBuf, Result<Done>)> =
+        cli.inputs.par_iter().map(|i| (i.clone(), convert_one(i, &cli, cover.as_ref(), &cli.out, kindle.as_deref()))).collect();
 
     let mut failed = 0;
     for (input, r) in results {
         match r {
             Ok(d) => {
-                println!("ok   {:>7.2}s  {:>7.1} MB  {}", d.secs, d.size as f64 / 1e6, d.out.display());
+                println!("ok   {:>7.2}s  {:>7.1} MB  {}", d.secs, megabytes(d.size), d.out.display());
                 for w in d.warnings.iter().take(5) {
                     println!("     aviso: {w}");
                 }
@@ -211,7 +213,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn check(inputs: &[PathBuf]) -> Result<()> {
+/// Decode each input and print a summary; exits with status 1 if any input fails.
+fn check(inputs: &[PathBuf]) {
     let mut bad = 0;
     for p in inputs {
         let res = std::fs::read(p).map_err(anyhow::Error::from).and_then(|d| reader::read(&d));
@@ -222,7 +225,7 @@ fn check(inputs: &[PathBuf]) -> Result<()> {
                 b.title,
                 b.files.len(),
                 b.toc.len(),
-                b.text.len() as f64 / 1e6,
+                megabytes(b.text.len()),
                 if b.exth_u32(201).is_some() { "sim" } else { "não" }
             ),
             Err(e) => {
@@ -234,5 +237,4 @@ fn check(inputs: &[PathBuf]) -> Result<()> {
     if bad > 0 {
         std::process::exit(1);
     }
-    Ok(())
 }

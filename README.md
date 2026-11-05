@@ -18,6 +18,8 @@ Medido num processador de 28 threads. O texto convertido foi conferido com o lei
 - **Capa na biblioteca do Kindle**: livros copiados por USB costumam aparecer sem capa. Com `--kindle`, o programa grava também a miniatura em `system/thumbnails/`, que é onde o Kindle procura.
 - **AZW3/MOBI prontos**: são copiados como estão, com a capa extraída para a biblioteca.
 - **Capa personalizada**: `--cover imagem.jpg`.
+- **EPUB sem capa**: busca a capa oficial no AniList / Open Library; sem internet (`--offline`) gera uma capa com título e autor.
+- **Verificação**: `kindle-turbo --check livro.azw3` decodifica o arquivo inteiro com um leitor KF8 independente (incluso) e mostra um resumo.
 - Imagens WebP/BMP viram JPEG ajustado à tela; JPEG/PNG/GIF passam sem recompressão.
 
 ## Instalar
@@ -52,12 +54,22 @@ Opções:
 | `-t, --title T` | título (use com uma entrada só) |
 | `-j, --jobs N` | limita o número de threads |
 | `--no-compress` | não comprime o texto |
+| `--offline` | não busca capa na internet |
+| `--check` | só verifica arquivos AZW3 |
 
 Depois de usar `--kindle`, ejete antes de desconectar:
 
 ```sh
 udisksctl unmount -b /dev/disk/by-label/Kindle && udisksctl power-off -b /dev/disk/by-label/Kindle
 ```
+
+## Qualidade
+
+- `unsafe` proibido (`forbid(unsafe_code)`).
+- Clippy `all` + `pedantic` + `nursery` + `cargo` + regras de `restriction` (sem `unwrap`/`expect`/`panic` fora de testes), tudo como erro. Zero `#[allow]` no código de produção.
+- Compressão PalmDOC com parsing ótimo (programação dinâmica), não gulosa.
+- Testes sem mock: EPUBs e imagens reais gerados no teste, convertidos e decodificados de volta pelo leitor KF8 próprio; testes de propriedade (proptest) na compressão; o binário real é executado nos testes de CLI. Testes com livros reais e com o AniList de verdade: `cargo test -- --ignored`.
+- CI no GitHub Actions: `fmt`, `clippy -D warnings`, testes.
 
 ## Limitações
 

@@ -6,12 +6,30 @@ use std::collections::HashMap;
 pub const RECORD_SIZE: usize = 4096;
 pub const NULL: u32 = 0xFFFF_FFFF;
 
+/// Saturating `usize` -> `u32`; identical to a plain cast for every in-range value.
+fn u32_of(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// Saturating `usize` -> `u16`; identical to a plain cast for every in-range value.
+fn u16_of(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
+}
+
+/// Saturating `usize` -> `u8`; identical to a plain cast for every in-range value.
+fn u8_of(n: usize) -> u8 {
+    u8::try_from(n).unwrap_or(u8::MAX)
+}
+
+/// Formats `num` in `base` (clamped to 2..=36), left padded with zeros.
 #[must_use]
 pub fn to_base(mut num: u64, base: u64, min_digits: usize) -> String {
     const DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let base = base.clamp(2, 36);
     let mut v = Vec::new();
     while num > 0 {
-        v.push(DIGITS[(num % base) as usize]);
+        let digit = usize::try_from(num % base).unwrap_or(0);
+        v.push(DIGITS.get(digit).copied().unwrap_or(b'0'));
         num /= base;
     }
     if v.is_empty() && min_digits == 0 {
@@ -20,8 +38,7 @@ pub fn to_base(mut num: u64, base: u64, min_digits: usize) -> String {
     while v.len() < min_digits {
         v.push(b'0');
     }
-    v.reverse();
-    String::from_utf8(v).unwrap()
+    v.iter().rev().map(|&b| char::from(b)).collect()
 }
 
 /// kindle:embed / kindle:flow reference numbers.
@@ -40,11 +57,9 @@ pub fn encint(mut value: u64, forward: bool) -> Vec<u8> {
             break;
         }
     }
-    if forward {
-        b[0] |= 0x80;
-    } else {
-        let l = b.len();
-        b[l - 1] |= 0x80;
+    let marked = if forward { b.first_mut() } else { b.last_mut() };
+    if let Some(byte) = marked {
+        *byte |= 0x80;
     }
     b.reverse();
     b
@@ -86,6 +101,7 @@ pub const fn be32(v: u32) -> [u8; 4] {
 
 // ---------------------------------------------------------------- CNCX
 
+#[derive(Debug)]
 pub struct Cncx {
     pub offsets: HashMap<String, u64>,
     pub records: Vec<Vec<u8>>,
@@ -93,11 +109,11 @@ pub struct Cncx {
 
 impl Cncx {
     pub fn new<'a>(strings: impl IntoIterator<Item = &'a str>) -> Self {
+        const LIMIT: usize = 0x10000 - 1024;
         let mut offsets: HashMap<String, u64> = HashMap::new();
         let mut records = Vec::new();
         let mut buf: Vec<u8> = Vec::new();
         let mut offset: u64 = 0;
-        const LIMIT: usize = 0x10000 - 1024;
         for s in strings {
             if offsets.contains_key(s) {
                 continue;
@@ -131,7 +147,7 @@ impl Cncx {
 
 // ---------------------------------------------------------------- INDX
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct TagMeta {
     pub name: &'static str,
     pub number: u8,
@@ -146,6 +162,7 @@ pub const fn tm(name: &'static str, number: u8, vpe: u8, mask: u8) -> TagMeta {
 }
 pub const END: TagMeta = TagMeta { name: "eof", number: 0, vpe: 0, mask: 0, end: 1 };
 
+#[derive(Debug)]
 pub struct IndexEntry {
     pub name: Vec<u8>,
     pub tags: Vec<(&'static str, Vec<u64>)>,
@@ -157,56 +174,47 @@ impl IndexEntry {
     }
 }
 
-fn mask_shift(mask: u8) -> u32 {
-    match mask {
-        1 | 3 => 0,
-        2 => 1,
-        4 | 12 => 2,
-        8 => 3,
-        16 | 48 => 4,
-        32 => 5,
-        64 | 192 => 6,
-        128 => 7,
-        _ => panic!("bad mask"),
-    }
+/// Bit position of the lowest set bit of a tag mask (1/3 -> 0, 4/12 -> 2, ...).
+const fn mask_shift(mask: u8) -> u32 {
+    mask.trailing_zeros()
 }
 
 const INDX_HEADER_LENGTH: usize = 192;
 
-#[must_use]
-pub fn build_index(tag_types: &[TagMeta], control_byte_count: usize, entries: &[IndexEntry], cncx: &Cncx) -> Vec<Vec<u8>> {
-    // control bytes
-    let control: Vec<Vec<u8>> = entries
-        .iter()
-        .map(|e| {
-            let mut cbs = Vec::new();
-            let mut ans: u32 = 0;
-            for t in tag_types {
-                if t.end == 1 {
-                    cbs.push(ans as u8);
-                    ans = 0;
-                    continue;
-                }
-                let nvals = e.get(t.name).map_or(0, Vec::len) as u32;
-                let nentries = nvals / u32::from(t.vpe);
-                ans |= u32::from(t.mask) & (nentries << mask_shift(t.mask));
-            }
-            assert_eq!(cbs.len(), control_byte_count);
-            cbs
-        })
-        .collect();
+/// One output INDX data record under construction.
+#[derive(Default)]
+struct Block {
+    index: Vec<u8>,
+    idxt: Vec<u8>,
+    count: u16,
+    last: Vec<u8>,
+}
 
+fn control_bytes(tag_types: &[TagMeta], e: &IndexEntry) -> Vec<u8> {
+    let mut cbs = Vec::new();
+    let mut ans: u32 = 0;
+    for t in tag_types {
+        if t.end == 1 {
+            cbs.push(ans.to_le_bytes()[0]);
+            ans = 0;
+            continue;
+        }
+        let nvals = u32_of(e.get(t.name).map_or(0, Vec::len));
+        let nentries = nvals / u32::from(t.vpe.max(1));
+        ans |= u32::from(t.mask) & (nentries << mask_shift(t.mask));
+    }
+    cbs
+}
+
+fn split_blocks(tag_types: &[TagMeta], entries: &[IndexEntry]) -> Vec<Block> {
     let record_limit = 0x10000 - INDX_HEADER_LENGTH - 1048;
-    let mut index_blocks: Vec<Vec<u8>> = vec![Vec::new()];
-    let mut idxt_blocks: Vec<Vec<u8>> = vec![Vec::new()];
-    let mut record_counts: Vec<u16> = vec![0];
-    let mut last_indices: Vec<Vec<u8>> = vec![Vec::new()];
-
-    for (i, e) in entries.iter().enumerate() {
+    let mut done: Vec<Block> = Vec::new();
+    let mut cur = Block::default();
+    for e in entries {
         let mut raw = Vec::with_capacity(32);
-        raw.push(e.name.len() as u8);
+        raw.push(u8_of(e.name.len()));
         raw.extend_from_slice(&e.name);
-        raw.extend_from_slice(&control[i]);
+        raw.extend_from_slice(&control_bytes(tag_types, e));
         for t in tag_types {
             if let Some(vals) = e.get(t.name) {
                 for &v in vals {
@@ -214,87 +222,97 @@ pub fn build_index(tag_types: &[TagMeta], control_byte_count: usize, entries: &[
                 }
             }
         }
-        let mut offset = index_blocks.last().unwrap().len();
-        let idxt_pos = idxt_blocks.last().unwrap().len();
-        if offset + idxt_pos + raw.len() + 2 > record_limit {
-            index_blocks.push(Vec::new());
-            idxt_blocks.push(Vec::new());
-            record_counts.push(0);
-            last_indices.push(Vec::new());
+        let mut offset = cur.index.len();
+        if offset + cur.idxt.len() + raw.len() + 2 > record_limit {
+            done.push(std::mem::take(&mut cur));
             offset = 0;
         }
-        *record_counts.last_mut().unwrap() += 1;
-        idxt_blocks.last_mut().unwrap().extend_from_slice(&((INDX_HEADER_LENGTH + offset) as u16).to_be_bytes());
-        index_blocks.last_mut().unwrap().extend_from_slice(&raw);
-        *last_indices.last_mut().unwrap() = e.name.clone();
+        cur.count += 1;
+        cur.idxt.extend_from_slice(&u16_of(INDX_HEADER_LENGTH + offset).to_be_bytes());
+        cur.index.extend_from_slice(&raw);
+        cur.last.clone_from(&e.name);
     }
+    done.push(cur);
+    done
+}
 
-    let mut index_records = Vec::new();
-    for ((ib, ix), &count) in index_blocks.into_iter().zip(idxt_blocks).zip(&record_counts) {
-        let ib = align4(ib);
-        let mut idxt = b"IDXT".to_vec();
-        idxt.extend_from_slice(&ix);
-        let idxt = align4(idxt);
-        let mut rec = b"INDX".to_vec();
-        rec.extend_from_slice(&be32(INDX_HEADER_LENGTH as u32));
-        rec.extend_from_slice(&[0; 4]);
-        rec.extend_from_slice(&be32(1));
-        rec.extend_from_slice(&[0; 4]);
-        rec.extend_from_slice(&be32((INDX_HEADER_LENGTH + ib.len()) as u32));
-        rec.extend_from_slice(&be32(u32::from(count)));
-        rec.extend_from_slice(&[0xFF; 8]);
-        rec.extend_from_slice(&[0; 156]);
-        rec.extend_from_slice(&ib);
-        rec.extend_from_slice(&idxt);
-        assert!(rec.len() <= 0x10000, "index record overflow");
-        index_records.push(rec);
-    }
+fn data_records(blocks: &[Block]) -> Vec<Vec<u8>> {
+    blocks
+        .iter()
+        .map(|blk| {
+            let ib = align4(blk.index.clone());
+            let mut idxt = b"IDXT".to_vec();
+            idxt.extend_from_slice(&blk.idxt);
+            let idxt = align4(idxt);
+            let mut rec = b"INDX".to_vec();
+            rec.extend_from_slice(&be32(u32_of(INDX_HEADER_LENGTH)));
+            rec.extend_from_slice(&[0; 4]);
+            rec.extend_from_slice(&be32(1));
+            rec.extend_from_slice(&[0; 4]);
+            rec.extend_from_slice(&be32(u32_of(INDX_HEADER_LENGTH + ib.len())));
+            rec.extend_from_slice(&be32(u32::from(blk.count)));
+            rec.extend_from_slice(&[0xFF; 8]);
+            rec.extend_from_slice(&[0; 156]);
+            rec.extend_from_slice(&ib);
+            rec.extend_from_slice(&idxt);
+            debug_assert!(rec.len() <= 0x10000, "index record overflow");
+            rec
+        })
+        .collect()
+}
 
+fn header_record(tag_types: &[TagMeta], control_byte_count: usize, blocks: &[Block], record_count: usize, cncx_records: usize) -> Vec<u8> {
     // TAGX
     let mut tagx = b"TAGX".to_vec();
     let body: Vec<u8> = tag_types.iter().flat_map(|t| [t.number, t.vpe, t.mask, t.end]).collect();
-    tagx.extend_from_slice(&be32((12 + body.len()) as u32));
-    tagx.extend_from_slice(&be32(control_byte_count as u32));
+    tagx.extend_from_slice(&be32(u32_of(12 + body.len())));
+    tagx.extend_from_slice(&be32(u32_of(control_byte_count)));
     tagx.extend_from_slice(&body);
 
     // geometry + IDXT of header
     let mut geometry = Vec::new();
     let mut idxt = b"IDXT".to_vec();
     let mut pos = INDX_HEADER_LENGTH + tagx.len();
-    for (last, &num) in last_indices.iter().zip(&record_counts) {
+    for blk in blocks {
         let start = geometry.len();
-        idxt.extend_from_slice(&(pos as u16).to_be_bytes());
-        geometry.push(last.len() as u8);
-        geometry.extend_from_slice(last);
-        geometry.extend_from_slice(&num.to_be_bytes());
+        idxt.extend_from_slice(&u16_of(pos).to_be_bytes());
+        geometry.push(u8_of(blk.last.len()));
+        geometry.extend_from_slice(&blk.last);
+        geometry.extend_from_slice(&blk.count.to_be_bytes());
         pos += geometry.len() - start;
     }
     let tagx = align4(tagx);
     let geometry = align4(geometry);
     let idxt = align4(idxt);
 
-    let num_entries: u32 = record_counts.iter().map(|&c| u32::from(c)).sum();
+    let num_entries: u32 = blocks.iter().map(|b| u32::from(b.count)).sum();
     let mut h = b"INDX".to_vec();
-    h.extend_from_slice(&be32(INDX_HEADER_LENGTH as u32));
+    h.extend_from_slice(&be32(u32_of(INDX_HEADER_LENGTH)));
     h.extend_from_slice(&[0; 8]);
     h.extend_from_slice(&be32(2));
     let idxt_offset = INDX_HEADER_LENGTH + tagx.len() + geometry.len();
-    h.extend_from_slice(&be32(idxt_offset as u32));
-    h.extend_from_slice(&be32(index_records.len() as u32));
+    h.extend_from_slice(&be32(u32_of(idxt_offset)));
+    h.extend_from_slice(&be32(u32_of(record_count)));
     h.extend_from_slice(&be32(65001));
     h.extend_from_slice(&be32(NULL));
     h.extend_from_slice(&be32(num_entries));
     h.extend_from_slice(&[0; 12]); // ordt, ligt, num ordt
-    h.extend_from_slice(&be32(cncx.records.len() as u32));
+    h.extend_from_slice(&be32(u32_of(cncx_records)));
     h.extend_from_slice(&[0; 124]);
-    h.extend_from_slice(&be32(INDX_HEADER_LENGTH as u32));
+    h.extend_from_slice(&be32(u32_of(INDX_HEADER_LENGTH)));
     h.extend_from_slice(&[0; 8]);
     debug_assert_eq!(h.len(), INDX_HEADER_LENGTH);
     h.extend_from_slice(&tagx);
     h.extend_from_slice(&geometry);
     h.extend_from_slice(&idxt);
-    let h = align4(h);
+    align4(h)
+}
 
+#[must_use]
+pub fn build_index(tag_types: &[TagMeta], control_byte_count: usize, entries: &[IndexEntry], cncx: &Cncx) -> Vec<Vec<u8>> {
+    let blocks = split_blocks(tag_types, entries);
+    let index_records = data_records(&blocks);
+    let h = header_record(tag_types, control_byte_count, &blocks, index_records.len(), cncx.records.len());
     let mut out = vec![h];
     out.extend(index_records);
     out.extend(cncx.records.iter().cloned());
@@ -328,11 +346,11 @@ struct TEntry {
     action: Action,
 }
 
-fn populate_strand(parent: TEntry, entries: &mut Vec<TEntry>) -> Vec<TEntry> {
+fn populate_strand(parent: &TEntry, entries: &mut Vec<TEntry>) -> Vec<TEntry> {
     let mut ans = vec![parent.clone()];
     if let Some(pos) = entries.iter().position(|c| c.parent == Some(parent.index)) {
         let child = entries.remove(pos);
-        ans.extend(populate_strand(child, entries));
+        ans.extend(populate_strand(&child, entries));
     } else {
         let mut current = parent.index;
         let mut siblings = Vec::new();
@@ -344,7 +362,7 @@ fn populate_strand(parent: TEntry, entries: &mut Vec<TEntry>) -> Vec<TEntry> {
                     entries.remove(p);
                 }
                 if entries.iter().any(|c| c.parent == Some(entry.index)) {
-                    siblings.extend(populate_strand(entry, entries));
+                    siblings.extend(populate_strand(&entry, entries));
                     break;
                 }
                 siblings.push(entry);
@@ -361,7 +379,7 @@ fn separate_strands(mut entries: Vec<TEntry>) -> Vec<Strand> {
     let mut ans = Vec::new();
     while !entries.is_empty() {
         let top = entries.remove(0);
-        let strand = populate_strand(top, &mut entries);
+        let strand = populate_strand(&top, &mut entries);
         let mut layers: Strand = Vec::new();
         for e in strand {
             match layers.iter_mut().find(|(d, _)| *d == e.depth) {
@@ -392,18 +410,21 @@ fn encode_strands(strands: &[Strand], tbs_type: u64) -> Result<Vec<(u64, Extra)>
         let mut seqs: Vec<(u64, Extra)> = Vec::new();
         for (_, entries) in strand {
             let mut extra = Extra::default();
-            if entries.last().unwrap().action == Action::Spans {
+            let (Some(first), Some(last)) = (entries.first(), entries.last()) else {
+                continue;
+            };
+            if last.action == Action::Spans {
                 extra.f1 = Some(0);
             }
-            if Some(entries[0].index) == first_index {
+            if Some(first.index) == first_index {
                 extra.f2 = Some(tbs_type);
             }
             if entries.len() > 1 {
-                extra.f4 = Some(entries.len() as u8);
+                extra.f4 = Some(u8_of(entries.len()));
             }
-            let mut index = entries[0].index - entries[0].parent.unwrap_or(0);
+            let mut index = first.index - first.parent.unwrap_or(0);
             if !ans.is_empty() && seqs.is_empty() {
-                index = last_index - entries[0].index;
+                index = last_index - first.index;
                 if index < 0 {
                     if tbs_type == 5 {
                         index = -index;
@@ -414,8 +435,8 @@ fn encode_strands(strands: &[Strand], tbs_type: u64) -> Result<Vec<(u64, Extra)>
                     extra.f8 = true;
                 }
             }
-            last_index = entries.last().unwrap().index;
-            seqs.push((index as u64, extra));
+            last_index = last.index;
+            seqs.push((index.cast_unsigned(), extra));
         }
         for i in 0..seqs.len().saturating_sub(1) {
             if seqs[i].1.f1.is_some() && seqs[i + 1].1.f1.is_some() {
@@ -453,7 +474,7 @@ pub fn trailing_byte_sequences(entries: &[NcxEntry], record_lengths: &[usize]) -
     let mut record_start: i64 = 0;
     let mut first_live = 0usize;
     for &rl in record_lengths {
-        let rl = rl as i64;
+        let rl = i64::try_from(rl).unwrap_or(i64::MAX);
         let next = record_start + rl;
         let mut local = Vec::new();
         // entries ending before this record can never touch later records either,
@@ -503,6 +524,7 @@ pub fn trailing_byte_sequences(entries: &[NcxEntry], record_lengths: &[usize]) -
 
 // ---------------------------------------------------------------- EXTH / header
 
+#[derive(Debug)]
 pub struct ExthInput<'a> {
     pub title: &'a str,
     pub authors: &'a [String],
@@ -521,12 +543,12 @@ pub struct ExthInput<'a> {
 }
 
 #[must_use]
-pub fn build_exth(m: &ExthInput) -> Vec<u8> {
+pub fn build_exth(m: &ExthInput<'_>) -> Vec<u8> {
     let mut b: Vec<u8> = Vec::new();
     let mut n = 0u32;
     let mut s = |b: &mut Vec<u8>, code: u32, data: &[u8]| {
         b.extend_from_slice(&be32(code));
-        b.extend_from_slice(&be32(data.len() as u32 + 8));
+        b.extend_from_slice(&be32(u32_of(data.len()).saturating_add(8)));
         b.extend_from_slice(data);
         n += 1;
     };
@@ -576,7 +598,7 @@ pub fn build_exth(m: &ExthInput) -> Vec<u8> {
 
     let pad = 4 - (b.len() % 4); // always at least one byte
     let mut out = b"EXTH".to_vec();
-    out.extend_from_slice(&be32((b.len() + 12) as u32));
+    out.extend_from_slice(&be32(u32_of(b.len() + 12)));
     out.extend_from_slice(&be32(n));
     out.extend_from_slice(&b);
     out.extend(std::iter::repeat_n(0u8, pad));
@@ -587,24 +609,86 @@ pub fn build_exth(m: &ExthInput) -> Vec<u8> {
 pub fn language_code(lang: &str) -> u32 {
     let base = lang.split(['-', '_']).next().unwrap_or("").to_lowercase();
     let (l, sub): (u32, u32) = match base.as_str() {
-        "af" => (54, 0), "ar" => (1, 0), "as" => (77, 0), "az" => (44, 0), "be" => (35, 0), "bg" => (2, 0),
-        "bn" => (69, 0), "ca" => (3, 0), "cs" => (5, 0), "da" => (6, 0), "de" => (7, 0), "el" => (8, 0),
-        "en" => (9, 0), "es" => (10, 0), "et" => (37, 0), "eu" => (45, 0), "fa" => (41, 0), "fi" => (11, 0),
-        "fo" => (56, 0), "fr" => (12, 0), "gu" => (71, 0), "he" => (13, 0), "hi" => (57, 0), "hr" => (26, 0),
-        "hu" => (14, 0), "hy" => (43, 0), "id" => (33, 0), "is" => (15, 0), "it" => (16, 0), "ja" => (17, 0),
-        "ka" => (55, 0), "kk" => (63, 0), "kn" => (75, 0), "ko" => (18, 0), "lt" => (39, 0), "lv" => (38, 0),
-        "mk" => (47, 0), "ml" => (76, 0), "mr" => (78, 0), "ms" => (62, 0), "mt" => (58, 0), "ne" => (97, 0),
-        "nl" => (19, 0), "no" => (20, 0), "or" => (72, 0), "pa" => (70, 0), "pl" => (21, 0), "pt" => (22, 0),
-        "rm" => (23, 0), "ro" => (24, 0), "ru" => (25, 0), "sa" => (79, 0), "se" => (59, 0), "sk" => (27, 0),
-        "sl" => (36, 0), "sq" => (28, 0), "sr" => (26, 12), "st" => (48, 0), "sv" => (29, 0), "sw" => (65, 0),
-        "ta" => (73, 0), "te" => (74, 0), "th" => (30, 0), "tn" => (50, 0), "tr" => (31, 0), "ts" => (49, 0),
-        "tt" => (68, 0), "uk" => (34, 0), "ur" => (32, 0), "uz" => (67, 0), "vi" => (42, 0), "xh" => (52, 0),
-        "zh" => (4, 0), "zu" => (53, 0),
+        "af" => (54, 0),
+        "ar" => (1, 0),
+        "as" => (77, 0),
+        "az" => (44, 0),
+        "be" => (35, 0),
+        "bg" => (2, 0),
+        "bn" => (69, 0),
+        "ca" => (3, 0),
+        "cs" => (5, 0),
+        "da" => (6, 0),
+        "de" => (7, 0),
+        "el" => (8, 0),
+        "en" => (9, 0),
+        "es" => (10, 0),
+        "et" => (37, 0),
+        "eu" => (45, 0),
+        "fa" => (41, 0),
+        "fi" => (11, 0),
+        "fo" => (56, 0),
+        "fr" => (12, 0),
+        "gu" => (71, 0),
+        "he" => (13, 0),
+        "hi" => (57, 0),
+        "hr" => (26, 0),
+        "hu" => (14, 0),
+        "hy" => (43, 0),
+        "id" => (33, 0),
+        "is" => (15, 0),
+        "it" => (16, 0),
+        "ja" => (17, 0),
+        "ka" => (55, 0),
+        "kk" => (63, 0),
+        "kn" => (75, 0),
+        "ko" => (18, 0),
+        "lt" => (39, 0),
+        "lv" => (38, 0),
+        "mk" => (47, 0),
+        "ml" => (76, 0),
+        "mr" => (78, 0),
+        "ms" => (62, 0),
+        "mt" => (58, 0),
+        "ne" => (97, 0),
+        "nl" => (19, 0),
+        "no" => (20, 0),
+        "or" => (72, 0),
+        "pa" => (70, 0),
+        "pl" => (21, 0),
+        "pt" => (22, 0),
+        "rm" => (23, 0),
+        "ro" => (24, 0),
+        "ru" => (25, 0),
+        "sa" => (79, 0),
+        "se" => (59, 0),
+        "sk" => (27, 0),
+        "sl" => (36, 0),
+        "sq" => (28, 0),
+        "sr" => (26, 12),
+        "st" => (48, 0),
+        "sv" => (29, 0),
+        "sw" => (65, 0),
+        "ta" => (73, 0),
+        "te" => (74, 0),
+        "th" => (30, 0),
+        "tn" => (50, 0),
+        "tr" => (31, 0),
+        "ts" => (49, 0),
+        "tt" => (68, 0),
+        "uk" => (34, 0),
+        "ur" => (32, 0),
+        "uz" => (67, 0),
+        "vi" => (42, 0),
+        "xh" => (52, 0),
+        "zh" => (4, 0),
+        "zu" => (53, 0),
         _ => (0, 0),
     };
     (sub << 8) | l
 }
 
+#[derive(Debug)]
 pub struct Record0Input<'a> {
     pub compression: u16,
     pub text_length: u32,
@@ -627,13 +711,13 @@ pub struct Record0Input<'a> {
 }
 
 #[must_use]
-pub fn build_record0(r: &Record0Input) -> Vec<u8> {
+pub fn build_record0(r: &Record0Input<'_>) -> Vec<u8> {
     let mut b = Vec::with_capacity(9000);
     b.extend_from_slice(&r.compression.to_be_bytes()); // 0
     b.extend_from_slice(&[0; 2]); // 2
     b.extend_from_slice(&be32(r.text_length)); // 4
     b.extend_from_slice(&r.last_text_record.to_be_bytes()); // 8
-    b.extend_from_slice(&(RECORD_SIZE as u16).to_be_bytes()); // 10
+    b.extend_from_slice(&u16_of(RECORD_SIZE).to_be_bytes()); // 10
     b.extend_from_slice(&[0; 4]); // 12 encryption + unused
     b.extend_from_slice(b"MOBI"); // 16
     b.extend_from_slice(&be32(264)); // 20
@@ -647,13 +731,13 @@ pub fn build_record0(r: &Record0Input) -> Vec<u8> {
     b.extend_from_slice(&be32(r.first_non_text_record)); // 80
     let title_offset_pos = b.len();
     b.extend_from_slice(&be32(0)); // 84 title offset (patched)
-    b.extend_from_slice(&be32(r.full_title.len() as u32)); // 88
+    b.extend_from_slice(&be32(u32_of(r.full_title.len()))); // 88
     b.extend_from_slice(&be32(r.language_code)); // 92
     b.extend_from_slice(&[0; 8]); // 96 in/out lang
     b.extend_from_slice(&be32(8)); // 104 min version
     b.extend_from_slice(&be32(r.first_resource_record)); // 108
     b.extend_from_slice(&[0; 16]); // 112 huff
-    b.extend_from_slice(&be32(0b1010000)); // 128 exth flags
+    b.extend_from_slice(&be32(0b101_0000)); // 128 exth flags
     b.extend_from_slice(&[0; 32]); // 132
     b.extend_from_slice(&be32(NULL)); // 164
     b.extend_from_slice(&be32(NULL)); // 168 drm offset
@@ -681,7 +765,7 @@ pub fn build_record0(r: &Record0Input) -> Vec<u8> {
     b.extend_from_slice(&[0; 4]); // 276
     debug_assert_eq!(b.len(), 280);
     b.extend_from_slice(r.exth);
-    let title_pos = b.len() as u32;
+    let title_pos = u32_of(b.len());
     b[title_offset_pos..title_offset_pos + 4].copy_from_slice(&be32(title_pos));
     b.extend_from_slice(r.full_title);
     b.extend(std::iter::repeat_n(0u8, 8192));
@@ -702,11 +786,8 @@ pub const EOF_RECORD: &[u8] = b"\xe9\x8e\r\n";
 
 #[must_use]
 pub fn write_pdb(title: &str, records: &[Vec<u8>], now: u32) -> Vec<u8> {
-    let mut name: Vec<u8> = title
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || "-.()[]".contains(c) { c as u8 } else { b'_' })
-        .take(31)
-        .collect();
+    let mut name: Vec<u8> =
+        title.chars().map(|c| if c.is_ascii_alphanumeric() || "-.()[]".contains(c) { c as u8 } else { b'_' }).take(31).collect();
     name.resize(32, 0);
     let total: usize = records.iter().map(Vec::len).sum();
     let n = records.len();
@@ -717,13 +798,13 @@ pub fn write_pdb(title: &str, records: &[Vec<u8>], now: u32) -> Vec<u8> {
     out.extend_from_slice(&be32(now));
     out.extend_from_slice(&[0; 16]);
     out.extend_from_slice(b"BOOKMOBI");
-    out.extend_from_slice(&be32((2 * n - 1) as u32));
+    out.extend_from_slice(&be32(u32_of((2 * n).saturating_sub(1))));
     out.extend_from_slice(&be32(0));
-    out.extend_from_slice(&(n as u16).to_be_bytes());
+    out.extend_from_slice(&u16_of(n).to_be_bytes());
     let mut offset = out.len() + 8 * n + 2;
     for (i, r) in records.iter().enumerate() {
-        out.extend_from_slice(&be32(offset as u32));
-        let uid = be32((2 * i) as u32);
+        out.extend_from_slice(&be32(u32_of(offset)));
+        let uid = be32(u32_of(2 * i));
         out.push(0);
         out.extend_from_slice(&uid[1..]);
         offset += r.len();

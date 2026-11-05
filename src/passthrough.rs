@@ -4,6 +4,7 @@
 use crate::images;
 use anyhow::{Result, anyhow};
 
+#[derive(Debug)]
 pub struct Info {
     pub title: String,
     pub asin: Option<String>,
@@ -11,60 +12,61 @@ pub struct Info {
     pub thumb: Option<Vec<u8>>,
 }
 
-fn u16be(d: &[u8], o: usize) -> Option<usize> {
-    d.get(o..o + 2).map(|b| u16::from_be_bytes([b[0], b[1]]) as usize)
+fn u16be(data: &[u8], offset: usize) -> Option<usize> {
+    data.get(offset..offset + 2).map(|bytes| usize::from(u16::from_be_bytes([bytes[0], bytes[1]])))
 }
-fn u32be(d: &[u8], o: usize) -> Option<usize> {
-    d.get(o..o + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+fn u32be(data: &[u8], offset: usize) -> Option<usize> {
+    data.get(offset..offset + 4).map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize)
 }
 
+/// Reads the title, ASIN, content type and cover thumbnail of a MOBI/AZW3 file.
+///
+/// # Errors
+/// Fails when the data is not a BOOKMOBI container or its headers are truncated.
 pub fn read(data: &[u8]) -> Result<Info> {
     let bad = || anyhow!("arquivo MOBI/AZW3 inválido");
     if data.get(60..68) != Some(b"BOOKMOBI") {
         return Err(bad());
     }
-    let n = u16be(data, 76).ok_or_else(bad)?;
-    let rec = |i: usize| -> Option<&[u8]> {
-        let s = u32be(data, 78 + 8 * i)?;
-        let e = if i + 1 < n { u32be(data, 78 + 8 * (i + 1))? } else { data.len() };
-        data.get(s..e)
+    let record_count = u16be(data, 76).ok_or_else(bad)?;
+    let record = |index: usize| -> Option<&[u8]> {
+        let start = u32be(data, 78 + 8 * index)?;
+        let end = if index + 1 < record_count { u32be(data, 78 + 8 * (index + 1))? } else { data.len() };
+        data.get(start..end)
     };
-    let r0 = rec(0).ok_or_else(bad)?;
-    let hlen = u32be(r0, 20).ok_or_else(bad)?;
-    let first_res = u32be(r0, 108).ok_or_else(bad)?;
-    let title_off = u32be(r0, 84).unwrap_or(0);
-    let title_len = u32be(r0, 88).unwrap_or(0);
-    let mut title = r0.get(title_off..title_off + title_len).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+    let header = record(0).ok_or_else(bad)?;
+    let hlen = u32be(header, 20).ok_or_else(bad)?;
+    let first_res = u32be(header, 108).ok_or_else(bad)?;
+    let title_off = u32be(header, 84).unwrap_or(0);
+    let title_len = u32be(header, 88).unwrap_or(0);
+    let mut title = header.get(title_off..title_off + title_len).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
 
     let mut asin = None;
     let mut cdetype = "EBOK".to_owned();
     let mut cover: Option<usize> = None;
     let mut thumb: Option<usize> = None;
     let exth = 16 + hlen;
-    if r0.get(exth..exth + 4) == Some(b"EXTH") {
-        let count = u32be(r0, exth + 8).unwrap_or(0);
-        let mut p = exth + 12;
-        for _ in 0..count {
-            let (Some(t), Some(l)) = (u32be(r0, p), u32be(r0, p + 4)) else { break };
-            if l < 8 {
+    if header.get(exth..exth + 4) == Some(b"EXTH") {
+        let exth_count = u32be(header, exth + 8).unwrap_or(0);
+        let mut pos = exth + 12;
+        for _ in 0..exth_count {
+            let (Some(tag), Some(len)) = (u32be(header, pos), u32be(header, pos + 4)) else { break };
+            if len < 8 {
                 break;
             }
-            let v = r0.get(p + 8..p + l).unwrap_or(&[]);
-            match t {
-                113 | 504 if asin.is_none() && !v.is_empty() => asin = Some(String::from_utf8_lossy(v).into_owned()),
-                501 if v.len() == 4 => cdetype = String::from_utf8_lossy(v).into_owned(),
-                503 if !v.is_empty() => title = String::from_utf8_lossy(v).into_owned(),
-                201 => cover = u32be(v, 0),
-                202 => thumb = u32be(v, 0),
+            let value = header.get(pos + 8..pos + len).unwrap_or(&[]);
+            match tag {
+                113 | 504 if asin.is_none() && !value.is_empty() => asin = Some(String::from_utf8_lossy(value).into_owned()),
+                501 if value.len() == 4 => cdetype = String::from_utf8_lossy(value).into_owned(),
+                503 if !value.is_empty() => title = String::from_utf8_lossy(value).into_owned(),
+                201 => cover = u32be(value, 0),
+                202 => thumb = u32be(value, 0),
                 _ => {}
             }
-            p += l;
+            pos += len;
         }
     }
-    let img = cover
-        .or(thumb)
-        .filter(|&c| c != 0xFFFF_FFFF && first_res != 0xFFFF_FFFF)
-        .and_then(|c| rec(first_res + c));
+    let img = cover.or(thumb).filter(|&c| c != 0xFFFF_FFFF && first_res != 0xFFFF_FFFF).and_then(|c| record(first_res + c));
     let thumb = img.and_then(|d| images::thumbnail(d, 330, 470, 64 * 1024).ok());
     Ok(Info { title, asin, cdetype, thumb })
 }

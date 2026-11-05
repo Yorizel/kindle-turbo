@@ -41,6 +41,7 @@ pub struct Meta {
     pub isbn: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct Book {
     pub meta: Meta,
     pub manifest: Vec<ManItem>,
@@ -54,21 +55,15 @@ pub struct Book {
 
 #[must_use]
 pub fn dirname(p: &str) -> &str {
-    match p.rfind('/') {
-        Some(i) => &p[..i],
-        None => "",
-    }
+    p.rfind('/').map_or("", |i| &p[..i])
 }
 
 /// Resolve `rel` (an href, possibly percent-encoded, without fragment) against directory `base`.
 #[must_use]
 pub fn resolve(base: &str, rel: &str) -> String {
     let rel = percent_encoding::percent_decode_str(rel).decode_utf8_lossy();
-    let mut parts: Vec<&str> = if rel.starts_with('/') || base.is_empty() {
-        Vec::new()
-    } else {
-        base.split('/').filter(|s| !s.is_empty()).collect()
-    };
+    let mut parts: Vec<&str> =
+        if rel.starts_with('/') || base.is_empty() { Vec::new() } else { base.split('/').filter(|s| !s.is_empty()).collect() };
     for seg in rel.split('/') {
         match seg {
             "" | "." => {}
@@ -84,10 +79,7 @@ pub fn resolve(base: &str, rel: &str) -> String {
 /// Split an href into (resolved path, fragment).
 #[must_use]
 pub fn resolve_href(base: &str, href: &str) -> (String, String) {
-    let (p, f) = match href.find('#') {
-        Some(i) => (&href[..i], &href[i + 1..]),
-        None => (href, ""),
-    };
+    let (p, f) = href.find('#').map_or((href, ""), |i| (&href[..i], &href[i + 1..]));
     let frag = percent_encoding::percent_decode_str(f).decode_utf8_lossy().into_owned();
     if p.is_empty() {
         return (String::new(), frag);
@@ -101,7 +93,10 @@ pub fn is_external(href: &str) -> bool {
     h.starts_with("http:") || h.starts_with("https:") || h.starts_with("mailto:") || h.starts_with("data:") || h.starts_with("kindle:")
 }
 
-fn read_all_entries(bytes: &[u8]) -> Result<(HashMap<String, Vec<u8>>, Vec<String>)> {
+/// Archive entries (name -> bytes) plus warnings about entries that could not be read.
+type Extracted = (HashMap<String, Vec<u8>>, Vec<String>);
+
+fn read_all_entries(bytes: &[u8]) -> Result<Extracted> {
     let archive = zip::ZipArchive::new(Cursor::new(bytes)).context("not a zip/epub")?;
     let n = archive.len();
     let results: Vec<Result<(String, Vec<u8>), String>> = (0..n)
@@ -111,7 +106,7 @@ fn read_all_entries(bytes: &[u8]) -> Result<(HashMap<String, Vec<u8>>, Vec<Strin
             |a, i| {
                 let mut f = a.by_index(i).map_err(|e| format!("entry {i}: {e}"))?;
                 let name = f.name().map(|n| n.to_string()).unwrap_or_default();
-                let mut buf = Vec::with_capacity(f.size() as usize);
+                let mut buf = Vec::with_capacity(usize::try_from(f.size()).unwrap_or(0));
                 f.read_to_end(&mut buf).map_err(|e| format!("{name}: {e}"))?;
                 Ok((name, buf))
             },
@@ -140,9 +135,17 @@ fn clean(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-pub fn open(bytes: &[u8]) -> Result<Book> {
-    let (files, mut warnings) = read_all_entries(bytes)?;
+/// Parsed contents of the OPF `<package>` document.
+struct Package {
+    meta: Meta,
+    manifest: Vec<ManItem>,
+    spine_ids: Vec<String>,
+    cover_id: Option<String>,
+    toc_id: Option<String>,
+    guide: Vec<GuideRef>,
+}
 
+fn find_opf_path(files: &HashMap<String, Vec<u8>>) -> Result<String> {
     let container = files.get("META-INF/container.xml").ok_or_else(|| anyhow!("missing META-INF/container.xml"))?;
     let cdoc = Doc::parse(container);
     let opf_path = cdoc
@@ -150,10 +153,10 @@ pub fn open(bytes: &[u8]) -> Result<Book> {
         .into_iter()
         .find_map(|n| (cdoc.nodes[n].name == "rootfile").then(|| cdoc.attr(n, "full-path").map(str::to_owned)).flatten())
         .ok_or_else(|| anyhow!("no rootfile in container.xml"))?;
-    let opf_path = resolve("", &opf_path);
-    let opf = Doc::parse(files.get(&opf_path).ok_or_else(|| anyhow!("missing OPF {opf_path}"))?);
-    let base = dirname(&opf_path).to_owned();
+    Ok(resolve("", &opf_path))
+}
 
+fn read_package(opf: &Doc, base: &str) -> Package {
     let mut meta = Meta::default();
     let mut cover_id: Option<String> = None;
     let mut manifest = Vec::new();
@@ -195,7 +198,7 @@ pub fn open(bytes: &[u8]) -> Result<Book> {
                 let href = opf.attr(n, "href").unwrap_or("");
                 manifest.push(ManItem {
                     id: opf.attr(n, "id").unwrap_or("").to_owned(),
-                    href: resolve_href(&base, href).0,
+                    href: resolve_href(base, href).0,
                     media_type: opf.attr(n, "media-type").unwrap_or("").to_lowercase(),
                     properties: opf.attr(n, "properties").unwrap_or("").to_owned(),
                 });
@@ -207,7 +210,7 @@ pub fn open(bytes: &[u8]) -> Result<Book> {
                 }
             }
             "reference" if pname == "guide" => {
-                let (p, f) = resolve_href(&base, opf.attr(n, "href").unwrap_or(""));
+                let (p, f) = resolve_href(base, opf.attr(n, "href").unwrap_or(""));
                 guide.push(GuideRef {
                     typ: opf.attr(n, "type").unwrap_or("").to_owned(),
                     title: opf.attr(n, "title").unwrap_or("").to_owned(),
@@ -217,15 +220,109 @@ pub fn open(bytes: &[u8]) -> Result<Book> {
             _ => {}
         }
     }
-    if meta.title.is_empty() {
-        meta.title = "Unknown".into();
+    Package { meta, manifest, spine_ids, cover_id, toc_id, guide }
+}
+
+/// Cover image path: the manifest-declared cover if it is a valid image, otherwise
+/// the single image of the cover page (guide `type=cover`, or the first spine page).
+fn find_cover(
+    files: &HashMap<String, Vec<u8>>,
+    pkg: &Package,
+    by_id: &HashMap<&str, &ManItem>,
+    spine: &[String],
+    warnings: &mut Vec<String>,
+) -> Option<String> {
+    let mut cover =
+        pkg.cover_id.as_deref().and_then(|id| by_id.get(id)).filter(|m| m.media_type.starts_with("image/")).map(|m| m.href.clone());
+    if cover.is_none() {
+        cover = pkg.manifest.iter().find(|m| m.properties.split_whitespace().any(|p| p == "cover-image")).map(|m| m.href.clone());
     }
-    if meta.language.is_empty() {
-        meta.language = "en".into();
+    let valid_image = |h: &str| files.get(h).is_some_and(|d| image::guess_format(d).is_ok());
+    if cover.as_deref().is_some_and(|c| !valid_image(c)) {
+        warnings.push("capa declarada no EPUB não é uma imagem válida".into());
+        cover = None;
+    }
+    if cover.is_none() {
+        let mut pages: Vec<String> = pkg
+            .guide
+            .iter()
+            .filter(|g| g.typ.eq_ignore_ascii_case("cover"))
+            .map(|g| g.href.split('#').next().unwrap_or("").to_owned())
+            .collect();
+        pages.extend(spine.first().cloned());
+        for p in pages {
+            let Some(data) = files.get(&p) else { continue };
+            let d = Doc::parse(data);
+            let imgs: Vec<String> = d
+                .descendants(d.root)
+                .into_iter()
+                .filter(|&n| matches!(d.nodes[n].name.as_str(), "img" | "image"))
+                .filter_map(|n| d.attr(n, "src").or_else(|| d.attr(n, "href")).map(|s| resolve_href(dirname(&p), s).0))
+                .collect();
+            let text_len = d.text_content(d.root).trim().chars().count();
+            if imgs.len() == 1 && text_len < 300 && valid_image(&imgs[0]) {
+                cover = Some(imgs[0].clone());
+                break;
+            }
+        }
+    }
+    cover
+}
+
+/// Table of contents: the NCX if present, otherwise the EPUB3 nav document.
+fn read_toc(files: &HashMap<String, Vec<u8>>, pkg: &Package, by_id: &HashMap<&str, &ManItem>) -> Vec<TocNode> {
+    let mut toc = Vec::new();
+    let ncx = pkg
+        .toc_id
+        .as_deref()
+        .and_then(|id| by_id.get(id))
+        .map(|m| m.href.clone())
+        .or_else(|| pkg.manifest.iter().find(|m| m.media_type == "application/x-dtbncx+xml").map(|m| m.href.clone()));
+    if let Some(p) = ncx.as_ref().filter(|p| files.contains_key(*p)) {
+        let d = Doc::parse(&files[p]);
+        if let Some(nm) = d.find_first(d.root, "navMap") {
+            toc = parse_ncx_points(&d, nm, dirname(p));
+        }
+    }
+    if toc.is_empty()
+        && let Some(m) = pkg.manifest.iter().find(|m| m.properties.split_whitespace().any(|p| p == "nav"))
+        && let Some(data) = files.get(&m.href)
+    {
+        let d = Doc::parse(data);
+        let navs: Vec<usize> = d.descendants(d.root).into_iter().filter(|&n| d.nodes[n].name == "nav").collect();
+        let nav = navs.iter().copied().find(|&n| d.attr(n, "type") == Some("toc")).or_else(|| navs.first().copied());
+        if let Some(nav) = nav
+            && let Some(ol) = d.find_first(nav, "ol")
+        {
+            toc = parse_nav_ol(&d, ol, dirname(&m.href));
+        }
+    }
+    toc
+}
+
+/// Read an EPUB from memory: metadata, manifest, spine, cover, TOC and guide.
+///
+/// # Errors
+///
+/// Fails if `bytes` is not a zip archive, if `META-INF/container.xml` or the OPF
+/// package document is missing, or if no spine item is present in the archive.
+pub fn open(bytes: &[u8]) -> Result<Book> {
+    let (files, mut warnings) = read_all_entries(bytes)?;
+    let opf_path = find_opf_path(&files)?;
+    let opf = Doc::parse(files.get(&opf_path).ok_or_else(|| anyhow!("missing OPF {opf_path}"))?);
+    let base = dirname(&opf_path).to_owned();
+    let mut pkg = read_package(&opf, &base);
+
+    if pkg.meta.title.is_empty() {
+        pkg.meta.title = "Unknown".into();
+    }
+    if pkg.meta.language.is_empty() {
+        pkg.meta.language = "en".into();
     }
 
-    let by_id: HashMap<&str, &ManItem> = manifest.iter().map(|m| (m.id.as_str(), m)).collect();
-    let spine: Vec<String> = spine_ids
+    let by_id: HashMap<&str, &ManItem> = pkg.manifest.iter().map(|m| (m.id.as_str(), m)).collect();
+    let spine: Vec<String> = pkg
+        .spine_ids
         .iter()
         .filter_map(|id| by_id.get(id.as_str()))
         .filter(|m| files.contains_key(&m.href))
@@ -235,79 +332,20 @@ pub fn open(bytes: &[u8]) -> Result<Book> {
         return Err(anyhow!("empty spine"));
     }
 
-    let mut cover = cover_id.as_deref().and_then(|id| by_id.get(id)).filter(|m| m.media_type.starts_with("image/")).map(|m| m.href.clone());
-    if cover.is_none() {
-        cover = manifest.iter().find(|m| m.properties.split_whitespace().any(|p| p == "cover-image")).map(|m| m.href.clone());
-    }
-    let valid_image = |h: &str| files.get(h).is_some_and(|d| image::guess_format(d).is_ok());
-    if cover.as_deref().is_some_and(|c| !valid_image(c)) {
-        warnings.push("capa declarada no EPUB não é uma imagem válida".into());
-        cover = None;
-    }
-    if cover.is_none() {
-        // cover page: guide type=cover, or first spine page; use its single image
-        let mut pages: Vec<String> = guide.iter().filter(|g| g.typ.eq_ignore_ascii_case("cover")).map(|g| g.href.split('#').next().unwrap_or("").to_owned()).collect();
-        pages.extend(spine.first().cloned());
-        for p in pages {
-            let Some(data) = files.get(&p) else { continue };
-            let d = Doc::parse(data);
-            let imgs: Vec<String> = d
-                .descendants(d.root)
-                .into_iter()
-                .filter(|&n| matches!(d.nodes[n].name.as_str(), "img" | "image"))
-                .filter_map(|n| d.attr(n, "src").or(d.attr(n, "href")).map(|s| resolve_href(dirname(&p), s).0))
-                .collect();
-            let text_len = d.text_content(d.root).trim().chars().count();
-            if imgs.len() == 1 && text_len < 300 && valid_image(&imgs[0]) {
-                cover = Some(imgs[0].clone());
-                break;
-            }
-        }
-    }
-
-    // TOC: prefer NCX, then EPUB3 nav
-    let mut toc = Vec::new();
-    let ncx = toc_id
-        .as_deref()
-        .and_then(|id| by_id.get(id))
-        .map(|m| m.href.clone())
-        .or_else(|| manifest.iter().find(|m| m.media_type == "application/x-dtbncx+xml").map(|m| m.href.clone()));
-    if let Some(p) = ncx.as_ref().filter(|p| files.contains_key(*p)) {
-        let d = Doc::parse(&files[p]);
-        if let Some(nm) = d.find_first(d.root, "navMap") {
-            toc = parse_ncx_points(&d, nm, dirname(p));
-        }
-    }
-    if toc.is_empty()
-        && let Some(m) = manifest.iter().find(|m| m.properties.split_whitespace().any(|p| p == "nav"))
-            && let Some(data) = files.get(&m.href) {
-                let d = Doc::parse(data);
-                let navs: Vec<usize> = d.descendants(d.root).into_iter().filter(|&n| d.nodes[n].name == "nav").collect();
-                let nav = navs.iter().copied().find(|&n| d.attr(n, "type") == Some("toc")).or(navs.first().copied());
-                if let Some(nav) = nav
-                    && let Some(ol) = d.find_first(nav, "ol") {
-                        toc = parse_nav_ol(&d, ol, dirname(&m.href));
-                    }
-            }
+    let cover = find_cover(&files, &pkg, &by_id, &spine, &mut warnings);
+    let toc = read_toc(&files, &pkg, &by_id);
     if toc.is_empty() {
         warnings.push("livro sem sumário (TOC)".into());
     }
 
-    Ok(Book { meta, manifest, spine, cover, toc, guide, files, warnings })
+    Ok(Book { meta: pkg.meta, manifest: pkg.manifest, spine, cover, toc, guide: pkg.guide, files, warnings })
 }
 
 fn parse_ncx_points(d: &Doc, parent: usize, base: &str) -> Vec<TocNode> {
     let mut out = Vec::new();
     for np in children_named(d, parent, "navPoint") {
-        let title = d
-            .find_first(np, "navLabel")
-            .map(|l| clean(&d.text_content(l)))
-            .unwrap_or_default();
-        let href = children_named(d, np, "content")
-            .first()
-            .and_then(|&c| d.attr(c, "src"))
-            .map(|s| join_href(base, s))
-            .unwrap_or_default();
+        let title = d.find_first(np, "navLabel").map(|l| clean(&d.text_content(l))).unwrap_or_default();
+        let href = children_named(d, np, "content").first().and_then(|&c| d.attr(c, "src")).map(|s| join_href(base, s)).unwrap_or_default();
         let children = parse_ncx_points(d, np, base);
         out.push(TocNode { title, href, children });
     }

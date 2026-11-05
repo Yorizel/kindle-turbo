@@ -111,13 +111,17 @@ pub fn compress(data: &[u8]) -> Vec<u8> {
         if b == b' ' && i + 1 < n && (0x40..0x80).contains(&data[i + 1]) {
             consider(1 + cost[i + 2], Step::SpacePair);
         }
-        for k in 1..=MAX_RUN.min(n - i) {
-            // a run may contain any bytes; header byte + k raw bytes
-            consider(1 + k as u32 + cost[i + k], Step::Run(k as u8));
+        for run_len in 1..=MAX_RUN.min(n - i) {
+            // a run may contain any bytes; header byte + run_len raw bytes
+            // (MAX_RUN is 8, so the conversion always succeeds)
+            let Ok(run) = u8::try_from(run_len) else { break };
+            consider(1 + u32::from(run) + cost[i + usize::from(run)], Step::Run(run));
         }
-        let (mlen, dist) = matches[i];
-        for len in MIN_MATCH..=mlen as usize {
-            consider(2 + cost[i + len], Step::Match { len: len as u8, dist });
+        let (max_len, dist) = matches[i];
+        for len in MIN_MATCH..=usize::from(max_len) {
+            // match lengths are at most MAX_MATCH (10), so the conversion succeeds
+            let Ok(len_byte) = u8::try_from(len) else { break };
+            consider(2 + cost[i + len], Step::Match { len: len_byte, dist });
         }
         cost[i] = best;
         step[i] = choice;
@@ -135,11 +139,11 @@ pub fn compress(data: &[u8]) -> Vec<u8> {
                 out.push(data[i + 1] ^ 0x80);
                 i += 2;
             }
-            Step::Run(k) => {
-                let k = usize::from(k);
-                out.push(k as u8);
-                out.extend_from_slice(&data[i..i + k]);
-                i += k;
+            Step::Run(run) => {
+                out.push(run);
+                let end = i + usize::from(run);
+                out.extend_from_slice(&data[i..end]);
+                i = end;
             }
             Step::Match { len, dist } => {
                 let code: u16 = 0x8000 | ((dist << 3) & 0x3FF8) | (u16::from(len) - 3);

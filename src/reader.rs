@@ -1,7 +1,9 @@
-//! A small, independent KF8 (AZW3) reader. It decodes everything the writer
-//! produces (`PalmDB`, record 0, EXTH, trailing entries, `PalmDOC`, FDST,
-//! INDX/TAGX/CNCX, skeleton + fragments) and rebuilds the XHTML files.
-//! Used by `--check` and by the test-suite to verify real output end to end.
+//! A small, independent KF8 (AZW3) reader.
+//!
+//! It decodes everything the writer produces (`PalmDB`, record 0, EXTH,
+//! trailing entries, `PalmDOC`, FDST, INDX/TAGX/CNCX, skeleton + fragments)
+//! and rebuilds the XHTML files. Used by `--check` and by the test-suite to
+//! verify real output end to end.
 
 use crate::palmdoc;
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -93,71 +95,97 @@ struct Entry {
     tags: FxHashMap<u8, Vec<usize>>,
 }
 
-fn read_index(records: &[Vec<u8>], first: usize) -> Result<(Vec<Entry>, Vec<u8>)> {
-    let h = records.get(first).ok_or_else(|| anyhow!("missing index header"))?;
-    ensure!(h.starts_with(b"INDX"), "index header magic");
-    let nrec = u32_at(h, 24)?;
-    let ncncx = u32_at(h, 52)?;
-    let tagx = u32_at(h, 180)?;
-    ensure!(h.get(tagx..tagx + 4) == Some(b"TAGX"), "TAGX magic");
-    let tlen = u32_at(h, tagx + 4)?;
-    let cbc = u32_at(h, tagx + 8)?;
-    let mut tags: Vec<[u8; 4]> = Vec::new();
-    let mut p = tagx + 12;
-    while p + 4 <= tagx + tlen {
-        let t = h.get(p..p + 4).ok_or_else(|| anyhow!("TAGX"))?;
-        tags.push([t[0], t[1], t[2], t[3]]);
-        p += 4;
-    }
+/// Reads the TAGX block of an INDX header: the tag definitions and the
+/// number of control bytes per entry.
+fn read_tagx(header: &[u8]) -> Result<(Vec<[u8; 4]>, usize)> {
+    let tagx = u32_at(header, 180)?;
+    ensure!(header.get(tagx..tagx + 4) == Some(b"TAGX"), "TAGX magic");
+    let table_len = u32_at(header, tagx + 4)?;
+    let control_len = u32_at(header, tagx + 8)?;
+    let table_end = tagx + table_len;
+    let defs = (tagx + 12..)
+        .step_by(4)
+        .take_while(|&pos| pos + 4 <= table_end)
+        .map(|pos| header.get(pos..pos + 4).and_then(|raw| <[u8; 4]>::try_from(raw).ok()).ok_or_else(|| anyhow!("TAGX")))
+        .collect::<Result<_>>()?;
+    Ok((defs, control_len))
+}
+
+/// Concatenates the CNCX records (each padded to 64 KiB) that follow an index.
+fn read_cncx(records: &[Vec<u8>], start: usize, count: usize) -> Result<Vec<u8>> {
     let mut cncx = Vec::new();
-    for i in 0..ncncx {
-        let r = records.get(first + 1 + nrec + i).ok_or_else(|| anyhow!("missing CNCX"))?;
-        let mut padded = r.clone();
+    for offset in 0..count {
+        let record = records.get(start + offset).ok_or_else(|| anyhow!("missing CNCX"))?;
+        let mut padded = record.clone();
         padded.resize(0x10000, 0);
         cncx.extend_from_slice(&padded);
     }
-    let mut entries = Vec::new();
-    for ri in 0..nrec {
-        let r = records.get(first + 1 + ri).ok_or_else(|| anyhow!("missing index record"))?;
-        ensure!(r.starts_with(b"INDX"), "index record magic");
-        let idxt = u32_at(r, 20)?;
-        let count = u32_at(r, 24)?;
-        ensure!(r.get(idxt..idxt + 4) == Some(b"IDXT"), "IDXT magic");
-        for e in 0..count {
-            let off = u16_at(r, idxt + 4 + 2 * e)?;
-            let nlen = usize::from(*r.get(off).ok_or_else(|| anyhow!("entry"))?);
-            let name = r.get(off + 1..off + 1 + nlen).ok_or_else(|| anyhow!("entry name"))?.to_vec();
-            let cb = r.get(off + 1 + nlen..off + 1 + nlen + cbc).ok_or_else(|| anyhow!("control bytes"))?;
-            let mut pos = off + 1 + nlen + cbc;
-            let mut vals: FxHashMap<u8, Vec<usize>> = FxHashMap::default();
-            let mut cbi = 0usize;
-            for &[num, vpe, mask, end] in &tags {
-                if end == 1 {
-                    cbi += 1;
-                    continue;
-                }
-                let c = *cb.get(cbi).ok_or_else(|| anyhow!("control byte"))?;
-                let value = c & mask;
-                if value == 0 {
-                    continue;
-                }
-                let n = if value == mask && mask.count_ones() > 1 {
-                    let (v, used) = decint(r.get(pos..).unwrap_or_default())?;
-                    pos += used;
-                    v * usize::from(vpe)
-                } else {
-                    usize::from(value >> mask.trailing_zeros()) * usize::from(vpe)
-                };
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    let (x, used) = decint(r.get(pos..).unwrap_or_default())?;
-                    pos += used;
-                    v.push(x);
-                }
-                vals.insert(num, v);
-            }
-            entries.push(Entry { name, tags: vals });
+    Ok(cncx)
+}
+
+/// Decodes one tag's values from the entry at `offset` inside an INDX data record.
+fn read_index_entry(record: &[u8], offset: usize, tag_defs: &[[u8; 4]], control_len: usize) -> Result<Entry> {
+    let name_len = usize::from(*record.get(offset).ok_or_else(|| anyhow!("entry"))?);
+    let name_end = offset + 1 + name_len;
+    let name = record.get(offset + 1..name_end).ok_or_else(|| anyhow!("entry name"))?.to_vec();
+    let controls = record.get(name_end..name_end + control_len).ok_or_else(|| anyhow!("control bytes"))?;
+    let mut pos = name_end + control_len;
+    let mut tags: FxHashMap<u8, Vec<usize>> = FxHashMap::default();
+    let mut control_index = 0usize;
+    for &[tag, values_per_entry, mask, end] in tag_defs {
+        if end == 1 {
+            control_index += 1;
+            continue;
         }
+        let control_byte = *controls.get(control_index).ok_or_else(|| anyhow!("control byte"))?;
+        let masked = control_byte & mask;
+        if masked == 0 {
+            continue;
+        }
+        let count = if masked == mask && mask.count_ones() > 1 {
+            let (quantity, used) = decint(record.get(pos..).unwrap_or_default())?;
+            pos += used;
+            quantity * usize::from(values_per_entry)
+        } else {
+            usize::from(masked >> mask.trailing_zeros()) * usize::from(values_per_entry)
+        };
+        let mut decoded = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (number, used) = decint(record.get(pos..).unwrap_or_default())?;
+            pos += used;
+            decoded.push(number);
+        }
+        tags.insert(tag, decoded);
+    }
+    Ok(Entry { name, tags })
+}
+
+/// Decodes every entry of one INDX data record.
+fn read_index_record(record: &[u8], tag_defs: &[[u8; 4]], control_len: usize) -> Result<Vec<Entry>> {
+    ensure!(record.starts_with(b"INDX"), "index record magic");
+    let idxt = u32_at(record, 20)?;
+    let count = u32_at(record, 24)?;
+    ensure!(record.get(idxt..idxt + 4) == Some(b"IDXT"), "IDXT magic");
+    (0..count)
+        .map(|entry_index| {
+            let offset = u16_at(record, idxt + 4 + 2 * entry_index)?;
+            read_index_entry(record, offset, tag_defs, control_len)
+        })
+        .collect()
+}
+
+/// Reads an INDX index starting at record `first`, returning its entries and its CNCX strings.
+fn read_index(records: &[Vec<u8>], first: usize) -> Result<(Vec<Entry>, Vec<u8>)> {
+    let header = records.get(first).ok_or_else(|| anyhow!("missing index header"))?;
+    ensure!(header.starts_with(b"INDX"), "index header magic");
+    let record_count = u32_at(header, 24)?;
+    let cncx_count = u32_at(header, 52)?;
+    let (tag_defs, control_len) = read_tagx(header)?;
+    let cncx = read_cncx(records, first + 1 + record_count, cncx_count)?;
+    let mut entries = Vec::new();
+    for data_index in 0..record_count {
+        let record = records.get(first + 1 + data_index).ok_or_else(|| anyhow!("missing index record"))?;
+        entries.extend(read_index_record(record, &tag_defs, control_len)?);
     }
     Ok((entries, cncx))
 }
@@ -168,112 +196,152 @@ fn cncx_string(cncx: &[u8], off: usize) -> Result<String> {
     Ok(String::from_utf8_lossy(s).into_owned())
 }
 
+/// Splits the `PalmDB` container into its records.
+fn split_records(data: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let count = u16_at(data, 76)?;
+    let mut offsets = Vec::with_capacity(count + 1);
+    for index in 0..count {
+        offsets.push(u32_at(data, 78 + 8 * index)?);
+    }
+    offsets.push(data.len());
+    (0..count)
+        .map(|index| data.get(offsets[index]..offsets[index + 1]).map(<[u8]>::to_vec).ok_or_else(|| anyhow!("record {index} out of range")))
+        .collect()
+}
+
+/// Reads the EXTH block that starts at `start` in record 0 (empty if absent).
+fn read_exth(record: &[u8], start: usize) -> Result<FxHashMap<u32, Vec<Vec<u8>>>> {
+    let mut exth: FxHashMap<u32, Vec<Vec<u8>>> = FxHashMap::default();
+    if record.get(start..start + 4) != Some(b"EXTH") {
+        return Ok(exth);
+    }
+    let count = u32_at(record, start + 8)?;
+    let mut pos = start + 12;
+    for _ in 0..count {
+        let code = u32::try_from(u32_at(record, pos)?)?;
+        let len = u32_at(record, pos + 4)?;
+        ensure!(len >= 8, "bad EXTH record length");
+        let value = record.get(pos + 8..pos + len).ok_or_else(|| anyhow!("EXTH out of range"))?.to_vec();
+        exth.entry(code).or_default().push(value);
+        pos += len;
+    }
+    Ok(exth)
+}
+
+/// Decompresses the text records (1..=`text_records`) into one buffer.
+fn decode_text(records: &[Vec<u8>], text_records: usize, compression: usize, extra: usize, text_len: usize) -> Result<Vec<u8>> {
+    let mut text = Vec::with_capacity(text_len);
+    for index in 1..=text_records {
+        let record = records.get(index).ok_or_else(|| anyhow!("missing text record {index}"))?;
+        let body = strip_trailing(record, extra).with_context(|| format!("text record {index}"))?;
+        if compression == 2 {
+            text.extend(palmdoc::decompress(body).ok_or_else(|| anyhow!("bad PalmDOC in record {index}"))?);
+        } else {
+            text.extend_from_slice(body);
+        }
+    }
+    ensure!(text.len() == text_len, "text length {} != header {}", text.len(), text_len);
+    Ok(text)
+}
+
+/// Reads the FDST flow table, checking that it covers all `text_len` bytes.
+fn read_flows(records: &[Vec<u8>], fdst: usize, text_len: usize) -> Result<Vec<(usize, usize)>> {
+    let fdst_record = records.get(fdst).ok_or_else(|| anyhow!("missing FDST"))?;
+    ensure!(fdst_record.starts_with(b"FDST"), "FDST magic");
+    let count = u32_at(fdst_record, 8)?;
+    let flows = (0..count)
+        .map(|index| Ok((u32_at(fdst_record, 12 + 8 * index)?, u32_at(fdst_record, 16 + 8 * index)?)))
+        .collect::<Result<Vec<(usize, usize)>>>()?;
+    ensure!(flows.last().map(|flow| flow.1) == Some(text_len), "FDST does not cover the text");
+    Ok(flows)
+}
+
+/// Rebuilds each XHTML file from its skeleton and the fragments inserted into it.
+fn rebuild_files(text: &[u8], skels: &[Entry], chunks: &[Entry], chunk_cncx: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let mut files = Vec::with_capacity(skels.len());
+    let mut chunk_cursor = 0usize;
+    for skel in skels {
+        let chunk_count = *skel.tags.get(&1).and_then(|v| v.first()).ok_or_else(|| anyhow!("skel chunk count"))?;
+        let geometry = skel.tags.get(&6).ok_or_else(|| anyhow!("skel geometry"))?;
+        let (start, len) = (geometry[0], geometry[1]);
+        let mut html = text.get(start..start + len).ok_or_else(|| anyhow!("skeleton out of range"))?.to_vec();
+        let mut base = start + len;
+        for _ in 0..chunk_count {
+            let chunk = chunks.get(chunk_cursor).ok_or_else(|| anyhow!("missing chunk {chunk_cursor}"))?;
+            chunk_cursor += 1;
+            let insert: usize = std::str::from_utf8(&chunk.name)?.parse()?;
+            let chunk_geometry = chunk.tags.get(&6).ok_or_else(|| anyhow!("chunk geometry"))?;
+            let frag = text.get(base..base + chunk_geometry[1]).ok_or_else(|| anyhow!("chunk out of range"))?;
+            if let Some(selector) = chunk.tags.get(&2).and_then(|v| v.first()) {
+                let selector = cncx_string(chunk_cncx, *selector)?;
+                ensure!(selector.contains("//*[@aid="), "bad chunk selector {selector}");
+            }
+            let at = insert.checked_sub(start).ok_or_else(|| anyhow!("insert before file start"))?;
+            ensure!(at <= html.len(), "insert position {at} beyond file length {}", html.len());
+            html.splice(at..at, frag.iter().copied());
+            base += chunk_geometry[1];
+        }
+        files.push(html);
+    }
+    ensure!(chunk_cursor == chunks.len(), "unused chunks");
+    Ok(files)
+}
+
+/// Reads the NCX table of contents as (depth, label, offset) triples.
+fn read_toc(records: &[Vec<u8>], ncx_index: usize) -> Result<Vec<(u32, String, usize)>> {
+    if ncx_index == 0xFFFF_FFFF {
+        return Ok(Vec::new());
+    }
+    let (entries, cncx) = read_index(records, ncx_index).context("NCX index")?;
+    entries
+        .into_iter()
+        .map(|entry| -> Result<(u32, String, usize)> {
+            let label = match entry.tags.get(&3).and_then(|v| v.first()) {
+                Some(&label_offset) => cncx_string(&cncx, label_offset)?,
+                None => String::new(),
+            };
+            let depth = entry.tags.get(&4).and_then(|v| v.first()).copied().unwrap_or(0);
+            let offset = entry.tags.get(&1).and_then(|v| v.first()).copied().unwrap_or(0);
+            Ok((u32::try_from(depth)?, label, offset))
+        })
+        .collect()
+}
+
 /// Parse and fully decode an AZW3 file.
 ///
 /// # Errors
 /// Any structural problem is reported with context.
 pub fn read(data: &[u8]) -> Result<Azw3> {
     ensure!(data.get(60..68) == Some(b"BOOKMOBI"), "not a BOOKMOBI file");
-    let n = u16_at(data, 76)?;
-    let mut offs = Vec::with_capacity(n + 1);
-    for i in 0..n {
-        offs.push(u32_at(data, 78 + 8 * i)?);
-    }
-    offs.push(data.len());
-    let records: Vec<Vec<u8>> = (0..n)
-        .map(|i| data.get(offs[i]..offs[i + 1]).map(<[u8]>::to_vec).ok_or_else(|| anyhow!("record {i} out of range")))
-        .collect::<Result<_>>()?;
-    let r0 = records.first().ok_or_else(|| anyhow!("no records"))?;
-    let compression = u16_at(r0, 0)?;
-    let text_len = u32_at(r0, 4)?;
-    let ntext = u16_at(r0, 8)?;
-    ensure!(u16_at(r0, 10)? == 4096, "record size must be 4096");
-    ensure!(r0.get(16..20) == Some(b"MOBI"), "MOBI magic");
-    let hlen = u32_at(r0, 20)?;
-    ensure!(u32_at(r0, 36)? == 8, "not KF8 (file version != 8)");
-    let first_res = u32_at(r0, 108)?;
-    let fdst = u32_at(r0, 192)?;
-    let extra = u32_at(r0, 240)?;
-    let ncx_index = u32_at(r0, 244)?;
-    let chunk_index = u32_at(r0, 248)?;
-    let skel_index = u32_at(r0, 252)?;
-    let title_off = u32_at(r0, 84)?;
-    let title_len = u32_at(r0, 88)?;
-    let title = String::from_utf8_lossy(r0.get(title_off..title_off + title_len).unwrap_or_default()).into_owned();
+    let records = split_records(data)?;
+    let header = records.first().ok_or_else(|| anyhow!("no records"))?;
+    let compression = u16_at(header, 0)?;
+    let text_len = u32_at(header, 4)?;
+    let text_records = u16_at(header, 8)?;
+    ensure!(u16_at(header, 10)? == 4096, "record size must be 4096");
+    ensure!(header.get(16..20) == Some(b"MOBI"), "MOBI magic");
+    let hlen = u32_at(header, 20)?;
+    ensure!(u32_at(header, 36)? == 8, "not KF8 (file version != 8)");
+    let first_res = u32_at(header, 108)?;
+    let fdst = u32_at(header, 192)?;
+    let extra = u32_at(header, 240)?;
+    let ncx_index = u32_at(header, 244)?;
+    let chunk_index = u32_at(header, 248)?;
+    let skel_index = u32_at(header, 252)?;
+    let title_off = u32_at(header, 84)?;
+    let title_len = u32_at(header, 88)?;
+    let title = String::from_utf8_lossy(header.get(title_off..title_off + title_len).unwrap_or_default()).into_owned();
+    let exth = read_exth(header, 16 + hlen)?;
 
-    let mut exth: FxHashMap<u32, Vec<Vec<u8>>> = FxHashMap::default();
-    let e = 16 + hlen;
-    if r0.get(e..e + 4) == Some(b"EXTH") {
-        let count = u32_at(r0, e + 8)?;
-        let mut p = e + 12;
-        for _ in 0..count {
-            let code = u32::try_from(u32_at(r0, p)?)?;
-            let len = u32_at(r0, p + 4)?;
-            ensure!(len >= 8, "bad EXTH record length");
-            exth.entry(code).or_default().push(r0.get(p + 8..p + len).ok_or_else(|| anyhow!("EXTH out of range"))?.to_vec());
-            p += len;
-        }
-    }
-
-    let mut text = Vec::with_capacity(text_len);
-    for i in 1..=ntext {
-        let rec = records.get(i).ok_or_else(|| anyhow!("missing text record {i}"))?;
-        let body = strip_trailing(rec, extra).with_context(|| format!("text record {i}"))?;
-        if compression == 2 {
-            text.extend(palmdoc::decompress(body).ok_or_else(|| anyhow!("bad PalmDOC in record {i}"))?);
-        } else {
-            text.extend_from_slice(body);
-        }
-    }
-    ensure!(text.len() == text_len, "text length {} != header {}", text.len(), text_len);
-
-    let fd = records.get(fdst).ok_or_else(|| anyhow!("missing FDST"))?;
-    ensure!(fd.starts_with(b"FDST"), "FDST magic");
-    let nflows = u32_at(fd, 8)?;
-    let flows: Vec<(usize, usize)> = (0..nflows).map(|i| Ok((u32_at(fd, 12 + 8 * i)?, u32_at(fd, 16 + 8 * i)?))).collect::<Result<_>>()?;
-    ensure!(flows.last().map(|f| f.1) == Some(text.len()), "FDST does not cover the text");
+    let text = decode_text(&records, text_records, compression, extra, text_len)?;
+    let flows = read_flows(&records, fdst, text.len())?;
 
     // skeleton + fragments
     let (skels, _) = read_index(&records, skel_index).context("SKEL index")?;
     let (chunks, chunk_cncx) = read_index(&records, chunk_index).context("FRAG index")?;
-    let mut files = Vec::with_capacity(skels.len());
-    let mut ci = 0usize;
-    for s in &skels {
-        let cc = *s.tags.get(&1).and_then(|v| v.first()).ok_or_else(|| anyhow!("skel chunk count"))?;
-        let g = s.tags.get(&6).ok_or_else(|| anyhow!("skel geometry"))?;
-        let (start, len) = (g[0], g[1]);
-        let mut html = text.get(start..start + len).ok_or_else(|| anyhow!("skeleton out of range"))?.to_vec();
-        let mut base = start + len;
-        for _ in 0..cc {
-            let c = chunks.get(ci).ok_or_else(|| anyhow!("missing chunk {ci}"))?;
-            ci += 1;
-            let insert: usize = std::str::from_utf8(&c.name)?.parse()?;
-            let cg = c.tags.get(&6).ok_or_else(|| anyhow!("chunk geometry"))?;
-            let frag = text.get(base..base + cg[1]).ok_or_else(|| anyhow!("chunk out of range"))?;
-            if let Some(sel) = c.tags.get(&2).and_then(|v| v.first()) {
-                let sel = cncx_string(&chunk_cncx, *sel)?;
-                ensure!(sel.contains("//*[@aid="), "bad chunk selector {sel}");
-            }
-            let at = insert.checked_sub(start).ok_or_else(|| anyhow!("insert before file start"))?;
-            ensure!(at <= html.len(), "insert position {at} beyond file length {}", html.len());
-            html.splice(at..at, frag.iter().copied());
-            base += cg[1];
-        }
-        files.push(html);
-    }
-    ensure!(ci == chunks.len(), "unused chunks");
+    let files = rebuild_files(&text, &skels, &chunks, &chunk_cncx)?;
+    let toc = read_toc(&records, ncx_index)?;
 
-    let mut toc = Vec::new();
-    if ncx_index != 0xFFFF_FFFF {
-        let (entries, cncx) = read_index(&records, ncx_index).context("NCX index")?;
-        for e in entries {
-            let label = e.tags.get(&3).and_then(|v| v.first()).map_or_else(|| Ok(String::new()), |&o| cncx_string(&cncx, o))?;
-            let depth = e.tags.get(&4).and_then(|v| v.first()).copied().unwrap_or(0);
-            let off = e.tags.get(&1).and_then(|v| v.first()).copied().unwrap_or(0);
-            toc.push((u32::try_from(depth)?, label, off));
-            let _ = e.name;
-        }
-    }
     Ok(Azw3 {
         title,
         exth,
@@ -282,7 +350,7 @@ pub fn read(data: &[u8]) -> Result<Azw3> {
         files,
         toc,
         first_resource: (first_res != 0xFFFF_FFFF).then_some(first_res),
-        text_records: ntext,
+        text_records,
         records,
     })
 }
@@ -307,11 +375,12 @@ impl Azw3 {
         self.records.get(self.first_resource? + i).map(Vec::as_slice)
     }
 
-    /// Plain text of the book (tags stripped), for content comparisons.
+    /// Plain text of the book (tags stripped, entities decoded), for content comparisons.
     #[must_use]
     pub fn plain_text(&self) -> String {
         let mut out = String::new();
         for f in &self.files {
+            let mut text = String::new();
             let s = String::from_utf8_lossy(f);
             let body = s.find("<body").map_or(&s[..], |i| &s[i..]);
             let mut in_tag = false;
@@ -320,12 +389,13 @@ impl Azw3 {
                     '<' => in_tag = true,
                     '>' => {
                         in_tag = false;
-                        out.push(' ');
+                        text.push(' ');
                     }
-                    _ if !in_tag => out.push(c),
+                    _ if !in_tag => text.push(c),
                     _ => {}
                 }
             }
+            out.push_str(&crate::dom::decode_entities(&text));
         }
         out
     }

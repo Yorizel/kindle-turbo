@@ -34,6 +34,10 @@ pub fn sniff(d: &[u8]) -> Kind {
 }
 
 /// Returns (data, mime).
+///
+/// # Errors
+///
+/// Fails if the data is not a decodable image or cannot be re-encoded as JPEG.
 pub fn process(data: &[u8]) -> Result<(Vec<u8>, &'static str)> {
     let k = sniff(data);
     if data.len() <= MAX_IMAGE_BYTES {
@@ -58,6 +62,12 @@ pub fn fit(img: DynamicImage, w: u32, h: u32) -> DynamicImage {
     img.resize(w, h, FilterType::Triangle)
 }
 
+/// Encode `img` as an RGB JPEG; transparency is flattened onto white.
+///
+/// # Errors
+///
+/// Fails if the dimensions do not fit the JPEG format (65535 pixels per side)
+/// or the encoder reports an error.
 pub fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>> {
     // flatten alpha onto white
     let rgb = if img.color().has_alpha() {
@@ -66,21 +76,27 @@ pub fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>> {
         for (o, p) in out.pixels_mut().zip(rgba.pixels()) {
             let a = u32::from(p[3]);
             for c in 0..3 {
-                o[c] = ((u32::from(p[c]) * a + 255 * (255 - a)) / 255) as u8;
+                // result is at most 255 because each channel and alpha are <= 255
+                o[c] = u8::try_from((u32::from(p[c]) * a + 255 * (255 - a)) / 255).unwrap_or(u8::MAX);
             }
         }
         out
     } else {
         img.to_rgb8()
     };
+    let width = u16::try_from(rgb.width()).map_err(|_| anyhow!("jpeg: largura excede 65535"))?;
+    let height = u16::try_from(rgb.height()).map_err(|_| anyhow!("jpeg: altura excede 65535"))?;
     let mut buf = Vec::new();
     let enc = jpeg_encoder::Encoder::new(&mut buf, quality);
-    enc.encode(rgb.as_raw(), rgb.width() as u16, rgb.height() as u16, jpeg_encoder::ColorType::Rgb)
-        .map_err(|e| anyhow!("jpeg: {e}"))?;
+    enc.encode(rgb.as_raw(), width, height, jpeg_encoder::ColorType::Rgb).map_err(|e| anyhow!("jpeg: {e}"))?;
     Ok(buf)
 }
 
 /// Cover thumbnail for the Kindle library (<= 16 KiB).
+///
+/// # Errors
+///
+/// Fails if `data` is not a decodable image or the JPEG encoding fails.
 pub fn thumbnail(data: &[u8], w: u32, h: u32, max_bytes: usize) -> Result<Vec<u8>> {
     let img = image::load_from_memory(data).map_err(|e| anyhow!("capa inválida: {e}"))?;
     let img = img.resize(w, h, FilterType::Triangle);

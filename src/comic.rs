@@ -1,6 +1,7 @@
-//! Manhwa / webtoon / manga input: a folder of images (optionally one sub-folder per
-//! chapter) or a .cbz/.zip. Long strips are stitched and re-cut into screen-sized
-//! pages, preferring cuts on blank rows so speech bubbles are not split.
+//! Manhwa / webtoon / manga input: a folder of images or a .cbz/.zip.
+//!
+//! Optional sub-folders become chapters. Long strips are stitched and re-cut into
+//! screen-sized pages, preferring cuts on blank rows so speech bubbles are not split.
 
 use crate::epub::{Book, ManItem, Meta, TocNode};
 use anyhow::{Context, Result, anyhow};
@@ -14,6 +15,10 @@ pub const PAGE_W: u32 = 1236;
 pub const PAGE_H: u32 = 1648;
 const JPEG_Q: u8 = 82;
 const BATCH: usize = 48;
+const CSS: &str = "@page{margin:0}body{margin:0;padding:0;text-align:center}img{width:100%;height:auto;margin:0;padding:0;display:block}div{page-break-after:always;margin:0;padding:0}";
+
+/// One input image: its archive or relative path, and the raw bytes.
+type Entry = (String, Vec<u8>);
 
 fn is_image_name(n: &str) -> bool {
     let l = n.to_lowercase();
@@ -111,25 +116,37 @@ fn scale_to_width(g: GrayImage, w: u32) -> GrayImage {
     if g.width() == w {
         return g;
     }
-    let h = ((u64::from(g.height()) * u64::from(w)) / u64::from(g.width())).max(1) as u32;
+    let scaled_h = (u64::from(g.height()) * u64::from(w)) / u64::from(g.width());
+    let h = u32::try_from(scaled_h.max(1)).unwrap_or(u32::MAX);
     image::imageops::resize(&g, w, h, FilterType::Triangle)
 }
 
+/// Shrinks a page to fit inside `PAGE_W` x `PAGE_H`, keeping the aspect ratio.
 fn fit_page(g: GrayImage) -> GrayImage {
-    let (w, h) = (g.width(), g.height());
-    if w <= PAGE_W && h <= PAGE_H {
+    let (w, h) = (u64::from(g.width()), u64::from(g.height()));
+    let (max_w, max_h) = (u64::from(PAGE_W), u64::from(PAGE_H));
+    if w <= max_w && h <= max_h {
         return g;
     }
-    let s = (f64::from(PAGE_W) / f64::from(w)).min(f64::from(PAGE_H) / f64::from(h));
-    image::imageops::resize(&g, ((f64::from(w) * s) as u32).max(1), ((f64::from(h) * s) as u32).max(1), FilterType::Triangle)
+    // scale by the tighter of the two bounds
+    let (new_w, new_h) = if max_w * h < max_h * w { (max_w, (h * max_w / w).max(1)) } else { ((w * max_h / h).max(1), max_h) };
+    let to_u32 = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
+    image::imageops::resize(&g, to_u32(new_w), to_u32(new_h), FilterType::Triangle)
 }
 
-fn encode_gray(g: &GrayImage) -> Vec<u8> {
+fn encode_gray(g: &GrayImage) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     jpeg_encoder::Encoder::new(&mut buf, JPEG_Q)
-        .encode(g.as_raw(), g.width() as u16, g.height() as u16, jpeg_encoder::ColorType::Luma)
-        .expect("jpeg encode");
-    buf
+        .encode(g.as_raw(), u16::try_from(g.width())?, u16::try_from(g.height())?, jpeg_encoder::ColorType::Luma)
+        .map_err(|e| anyhow!("falha ao codificar JPEG: {e}"))?;
+    Ok(buf)
+}
+
+/// Wraps `PAGE_W`-wide grayscale rows in an image; the height comes from the buffer length.
+fn rows_to_gray(rows: Vec<u8>) -> Result<GrayImage> {
+    let w = PAGE_W as usize;
+    let h = u32::try_from(rows.len() / w)?;
+    GrayImage::from_raw(PAGE_W, h, rows).ok_or_else(|| anyhow!("buffer de página inconsistente"))
 }
 
 /// A row is a good cut if it is (almost) a single flat colour.
@@ -174,7 +191,7 @@ struct Chapter {
 }
 
 /// Stream images of one chapter into screen pages.
-fn render_chapter(images: &[&(String, Vec<u8>)]) -> Vec<Vec<u8>> {
+fn render_chapter(images: &[&Entry]) -> Result<Vec<Vec<u8>>> {
     let mut pages: Vec<GrayImage> = Vec::new();
     let mut out: Vec<Vec<u8>> = Vec::new();
     let w = PAGE_W as usize;
@@ -186,8 +203,7 @@ fn render_chapter(images: &[&(String, Vec<u8>)]) -> Vec<Vec<u8>> {
             if !strip {
                 // regular page: flush pending strip first
                 if !carry.is_empty() {
-                    let h = carry.len() / w;
-                    pages.push(GrayImage::from_raw(PAGE_W, h as u32, std::mem::take(&mut carry)).unwrap());
+                    pages.push(rows_to_gray(std::mem::take(&mut carry))?);
                 }
                 pages.push(fit_page(g));
                 continue;
@@ -201,27 +217,32 @@ fn render_chapter(images: &[&(String, Vec<u8>)]) -> Vec<Vec<u8>> {
                 }
                 let cut = find_cut(&carry, w, h);
                 let rest = carry.split_off(cut * w);
-                pages.push(GrayImage::from_raw(PAGE_W, cut as u32, std::mem::replace(&mut carry, rest)).unwrap());
+                pages.push(rows_to_gray(std::mem::replace(&mut carry, rest))?);
             }
         }
         // encode what we have so far in parallel to bound memory
         let ready: Vec<GrayImage> = std::mem::take(&mut pages);
-        out.extend(ready.into_par_iter().filter(|p| !is_blank(p)).map(|p| encode_gray(&p)).collect::<Vec<_>>());
+        let encoded: Vec<Vec<u8>> = ready.into_par_iter().filter(|p| !is_blank(p)).map(|p| encode_gray(&p)).collect::<Result<_>>()?;
+        out.extend(encoded);
     }
     if carry.len() / w > 40 {
-        let h = carry.len() / w;
-        let g = GrayImage::from_raw(PAGE_W, h as u32, carry).unwrap();
+        let g = rows_to_gray(carry)?;
         if !is_blank(&g) {
-            out.push(encode_gray(&g));
+            out.push(encode_gray(&g)?);
         }
     }
-    out
+    Ok(out)
 }
 
+/// Reads a manhwa folder or CBZ and builds an EPUB book model with one image per screen page.
+///
+/// # Errors
+///
+/// Fails if the input cannot be read, holds no images, or produces no pages.
 pub fn open(input: &Path, title: Option<&str>) -> Result<Book> {
     let items = collect(input)?;
     // group by parent folder => chapters
-    let mut chapters_raw: Vec<(String, Vec<&(String, Vec<u8>)>)> = Vec::new();
+    let mut chapters_raw: Vec<(String, Vec<&Entry>)> = Vec::new();
     for it in &items {
         let dir = it.0.rsplit_once('/').map(|(d, _)| d.to_owned()).unwrap_or_default();
         match chapters_raw.last_mut() {
@@ -234,26 +255,23 @@ pub fn open(input: &Path, title: Option<&str>) -> Result<Book> {
         .par_iter()
         .with_max_len(1)
         .enumerate()
-        .map(|(i, (dir, imgs))| Chapter {
-            title: if multi {
-                dir.rsplit('/').next().filter(|s| !s.is_empty()).map(str::to_owned).unwrap_or(format!("Capítulo {}", i + 1))
+        .map(|(i, (dir, imgs))| -> Result<Chapter> {
+            let title = if multi {
+                dir.rsplit('/').next().filter(|s| !s.is_empty()).map_or_else(|| format!("Capítulo {}", i + 1), str::to_owned)
             } else {
                 "Início".to_owned()
-            },
-            pages: render_chapter(imgs),
+            };
+            Ok(Chapter { title, pages: render_chapter(imgs)? })
         })
-        .collect();
+        .collect::<Result<_>>()?;
 
-    let name = title.map_or_else(|| {
-        input.file_stem().map_or_else(|| "Manhwa".into(), |s| s.to_string_lossy().into_owned())
-    }, str::to_owned);
+    let name = title.map_or_else(|| input.file_stem().map_or_else(|| "Manhwa".into(), |s| s.to_string_lossy().into_owned()), str::to_owned);
 
     let mut files: HashMap<String, Vec<u8>> = HashMap::new();
     let mut manifest = Vec::new();
     let mut spine = Vec::new();
     let mut toc = Vec::new();
-    let css = "@page{margin:0}body{margin:0;padding:0;text-align:center}img{width:100%;height:auto;margin:0;padding:0;display:block}div{page-break-after:always;margin:0;padding:0}";
-    files.insert("OEBPS/style.css".into(), css.as_bytes().to_vec());
+    files.insert("OEBPS/style.css".into(), CSS.as_bytes().to_vec());
     manifest.push(ManItem { id: "css".into(), href: "OEBPS/style.css".into(), media_type: "text/css".into(), properties: String::new() });
     let mut n = 0usize;
     let mut cover = None;
@@ -268,7 +286,12 @@ pub fn open(input: &Path, title: Option<&str>) -> Result<Book> {
             files.insert(img.clone(), p);
             files.insert(html.clone(), x.into_bytes());
             manifest.push(ManItem { id: format!("i{n}"), href: img.clone(), media_type: "image/jpeg".into(), properties: String::new() });
-            manifest.push(ManItem { id: format!("p{n}"), href: html.clone(), media_type: "application/xhtml+xml".into(), properties: String::new() });
+            manifest.push(ManItem {
+                id: format!("p{n}"),
+                href: html.clone(),
+                media_type: "application/xhtml+xml".into(),
+                properties: String::new(),
+            });
             if cover.is_none() {
                 cover = Some(img);
             }

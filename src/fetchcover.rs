@@ -16,11 +16,12 @@ fn agent() -> ureq::Agent {
 fn variants(title: &str) -> Vec<String> {
     let mut v = vec![title.trim().to_owned()];
     for sep in [" - ", " – ", ": ", ", ", " (", " ["] {
-        if let Some((head, _)) = v.last().unwrap().clone().split_once(sep) {
-            let h = head.trim().to_owned();
-            if h.len() >= 4 && !v.contains(&h) {
-                v.push(h);
-            }
+        let Some((head, _)) = v.last().and_then(|t| t.split_once(sep)) else {
+            continue;
+        };
+        let h = head.trim().to_owned();
+        if h.len() >= 4 && !v.contains(&h) {
+            v.push(h);
         }
     }
     v
@@ -56,14 +57,15 @@ fn anilist(a: &ureq::Agent, q: &str, comic: bool) -> Option<String> {
         s
     };
     let best = media.iter().max_by_key(|m| score(m))?;
-    best["coverImage"]["extraLarge"].as_str().or(best["coverImage"]["large"].as_str()).map(str::to_owned)
+    best["coverImage"]["extraLarge"].as_str().or_else(|| best["coverImage"]["large"].as_str()).map(str::to_owned)
 }
 
 fn openlibrary(a: &ureq::Agent, q: &str, author: Option<&str>) -> Option<String> {
     let enc = |s: &str| percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string();
     let mut url = format!("https://openlibrary.org/search.json?limit=3&fields=cover_i,title&title={}", enc(q));
     if let Some(au) = author {
-        url.push_str(&format!("&author={}", enc(au)));
+        url.push_str("&author=");
+        url.push_str(&enc(au));
     }
     let v: Value = a.get(&url).call().ok()?.body_mut().read_json().ok()?;
     let id = v["docs"].as_array()?.iter().find_map(|d| d["cover_i"].as_i64())?;
@@ -84,14 +86,16 @@ pub fn find(title: &str, author: Option<&str>, comic: bool) -> Option<(Vec<u8>, 
     let a = agent();
     for q in variants(title) {
         if let Some(url) = anilist(&a, &q, comic)
-            && let Some(d) = download(&a, &url) {
-                return Some((d, "AniList"));
-            }
+            && let Some(d) = download(&a, &url)
+        {
+            return Some((d, "AniList"));
+        }
         if !comic
             && let Some(url) = openlibrary(&a, &q, author)
-                && let Some(d) = download(&a, &url) {
-                    return Some((d, "Open Library"));
-                }
+            && let Some(d) = download(&a, &url)
+        {
+            return Some((d, "Open Library"));
+        }
     }
     None
 }
