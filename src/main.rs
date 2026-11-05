@@ -252,10 +252,65 @@ fn is_comic(input: &Path) -> bool {
     input.is_dir() || ext.as_deref() == Some("cbz") || (ext.as_deref() == Some("zip") && !is_epub_zip(input))
 }
 
+/// A folder of chapter CBZs (as downloaders save them): each archive becomes one
+/// Kindle-ready chapter. Chapters are rendered a few at a time and written as
+/// soon as they are done, so a 200-chapter series never sits in memory at once.
+/// Chapters already converted (output newer than the source) are skipped.
+fn koreader_series(input: &Path, archives: &[PathBuf], cli: &Cli, out_dir: &Path, kindle: Option<&Path>, t: Instant) -> Result<Done> {
+    let series = cli.title.clone().unwrap_or_else(|| comic::series_name(input));
+    let rel_dir = PathBuf::from("Manhwas").join(sanitize(&series));
+    let roots: Vec<PathBuf> = std::iter::once(out_dir.to_path_buf()).chain(kindle.map(|k| k.join("documents"))).collect();
+    for root in &roots {
+        std::fs::create_dir_all(root.join(&rel_dir))?;
+    }
+    let total = archives.len();
+    let mut size = 0usize;
+    let mut skipped = 0usize;
+    for chunk in archives.chunks(comic::CHAPTERS_IN_FLIGHT) {
+        let done: Vec<(usize, usize)> = chunk
+            .par_iter()
+            .map(|src| -> Result<(usize, usize)> {
+                let name = src.file_stem().map_or_else(|| "Capítulo".to_owned(), |s| s.to_string_lossy().into_owned());
+                let rel = rel_dir.join(format!("{}.cbz", sanitize(&name)));
+                let missing: Vec<PathBuf> = roots.iter().map(|r| r.join(&rel)).filter(|p| !is_fresh(p, src)).collect();
+                if missing.is_empty() {
+                    return Ok((0, 1));
+                }
+                let rendered = comic::render(src, Some(&series)).with_context(|| format!("convertendo {}", src.display()))?;
+                let pages: Vec<Vec<u8>> = rendered.chapters.into_iter().flat_map(|c| c.pages).collect();
+                let data = comic::chapter_cbz(&series, &comic::Chapter { title: name.clone(), pages })?;
+                for path in &missing {
+                    std::fs::write(path, &data).with_context(|| format!("gravando {}", path.display()))?;
+                }
+                eprintln!("  {name}  {:.1} MB", megabytes(data.len()));
+                Ok((data.len(), 0))
+            })
+            .collect::<Result<_>>()?;
+        for (w, s) in done {
+            size += w;
+            skipped += s;
+        }
+    }
+    if skipped > 0 {
+        eprintln!("  {skipped}/{total} capítulos já convertidos, pulados");
+    }
+    Ok(Done { input: input.to_path_buf(), out: out_dir.join(&rel_dir), secs: t.elapsed().as_secs_f64(), size, warnings: Vec::new() })
+}
+
+/// `out` exists and is at least as new as `src`.
+fn is_fresh(out: &Path, src: &Path) -> bool {
+    let m = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    matches!((m(out), m(src)), (Some(o), Some(s)) if o >= s)
+}
+
 /// `KOReader` reads EPUB and CBZ natively: copy EPUBs, pre-render comics.
 fn koreader_one(input: &Path, cli: &Cli, out_dir: &Path, kindle: Option<&Path>, t: Instant) -> Result<Done> {
     // manhwa -> documents/Manhwas/<Série>/<Capítulo>.cbz (one file per chapter)
     // novel  -> documents/Novels/<Título>.epub (as-is)
+    let archives = if input.is_dir() { comic::chapter_archives(input) } else { Vec::new() };
+    if !archives.is_empty() {
+        return koreader_series(input, &archives, cli, out_dir, kindle, t);
+    }
     let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     if is_comic(input) {
         let rendered = comic::render(input, cli.title.as_deref())?;

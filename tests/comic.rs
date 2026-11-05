@@ -136,3 +136,26 @@ fn gutters_are_collapsed_so_pages_are_few() {
     let pages: usize = r.chapters.iter().map(|c| c.pages.len()).sum();
     assert_eq!(pages, 1, "two short panels with a huge gap between them fit one page");
 }
+
+#[test]
+fn series_name_drops_downloader_slug() {
+    use std::path::Path;
+    assert_eq!(
+        comic::series_name(Path::new("/x/Return of the Disaster-Class Hero [return-of-the-disaster-class-hero]")),
+        "Return of the Disaster-Class Hero"
+    );
+    assert_eq!(comic::series_name(Path::new("/x/Solo Leveling")), "Solo Leveling");
+    assert_eq!(comic::series_name(Path::new("/x/[only-tag]")), "[only-tag]");
+}
+
+#[test]
+fn chapter_archives_in_natural_order() {
+    let dir = tempfile::tempdir().unwrap();
+    for n in ["Capítulo 10.cbz", "Capítulo 2.cbz", "Capítulo 0.cbz", "notes.txt"] {
+        std::fs::write(dir.path().join(n), b"x").unwrap();
+    }
+    std::fs::create_dir(dir.path().join("Capítulo 0.sdr")).unwrap();
+    let names: Vec<String> =
+        comic::chapter_archives(dir.path()).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, ["Capítulo 0.cbz", "Capítulo 2.cbz", "Capítulo 10.cbz"]);
+}

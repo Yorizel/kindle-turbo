@@ -11,13 +11,14 @@ use image::{GrayImage, imageops::FilterType};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const PAGE_W: u32 = 1236;
 pub const PAGE_H: u32 = 1648;
 /// e-ink shows 16 grey levels: q55 is indistinguishable there and keeps pages light
 const JPEG_Q: u8 = 55;
-const CHAPTERS_IN_FLIGHT: usize = 4;
+/// Chapters rendered at once (each already uses every core internally).
+pub const CHAPTERS_IN_FLIGHT: usize = 4;
 const CSS: &str = "@page{margin:0}body{margin:0;padding:0;text-align:center}img{width:100%;height:auto;margin:0;padding:0;display:block}div{page-break-after:always;margin:0;padding:0}";
 
 /// One input image: its archive or relative path, and the raw bytes.
@@ -289,6 +290,32 @@ pub fn render(input: &Path, title: Option<&str>) -> Result<Rendered> {
         return Err(anyhow!("nenhuma página gerada"));
     }
     Ok(Rendered { title: name, chapters })
+}
+
+/// Chapter archives (`.cbz` / `.zip`) directly inside `dir`, in natural order
+/// (`Capítulo 2` before `Capítulo 10`). Empty when `dir` is not a folder of archives.
+#[must_use]
+pub fn chapter_archives(dir: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut v: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_file()
+                && p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("cbz") || e.eq_ignore_ascii_case("zip"))
+        })
+        .collect();
+    v.sort_by_cached_key(|p| p.file_stem().map(|s| natural_key(&s.to_string_lossy())).unwrap_or_default());
+    v
+}
+
+/// Series name from a folder name, without a trailing downloader tag like ` [some-slug]`.
+#[must_use]
+pub fn series_name(dir: &Path) -> String {
+    let name = dir.file_name().map_or_else(|| "Manhwa".to_owned(), |s| s.to_string_lossy().into_owned());
+    match name.trim_end().strip_suffix(']').and_then(|s| s.rsplit_once(" [")) {
+        Some((base, _)) if !base.trim().is_empty() => base.trim().to_owned(),
+        _ => name.trim().to_owned(),
+    }
 }
 
 /// Package one chapter as a CBZ (stored: JPEGs are already compressed).

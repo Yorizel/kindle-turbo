@@ -21,7 +21,7 @@ Medido num processador de 28 threads. O texto convertido foi conferido com o lei
 - **EPUB sem capa**: busca a capa oficial no AniList / Open Library; sem internet (`--offline`) gera uma capa com título e autor.
 - **Verificação**: `kindle-turbo --check livro.azw3` decodifica o arquivo inteiro com um leitor KF8 independente (incluso) e mostra um resumo.
 - Imagens WebP/BMP viram JPEG ajustado à tela; JPEG/PNG/GIF passam sem recompressão (PNG otimizado sem perdas).
-- **Manhwa para KOReader** (`--koreader`): o capítulo inteiro vira uma tira contínua; os quadros são detectados por bordas (funciona em fundo escuro e gradiente), cada página recebe quadros inteiros (balão junto da cena) e só quadros maiores que a tela são cortados, com sobreposição para não perder o contexto. Todas as páginas têm o mesmo tamanho (sem zoom pulando), sem upscaling, autocontraste para e-ink, cinza JPEG q55 com Huffman otimizado. 7 capítulos em ~6 s. Algoritmo inspirado no `comic2panel` do KCC.
+- **Manhwa para KOReader** (`--koreader`): o capítulo inteiro vira uma tira contínua; os quadros são detectados por bordas (funciona em fundo escuro e gradiente), cada página recebe quadros inteiros (balão junto da cena) e só quadros maiores que a tela são cortados, com sobreposição para não perder o contexto. Todas as páginas têm o mesmo tamanho (sem zoom pulando), sem upscaling, autocontraste para e-ink, cinza JPEG q55 com Huffman otimizado. Aceita também uma pasta com um `.cbz` por capítulo (como os downloaders salvam): converte em streaming, 4 capítulos por vez, e pula os que já foram convertidos. 196 capítulos (2,5 GB) em ~2,5 min. Algoritmo inspirado no `comic2panel` do KCC.
 
 ## Instalar
 
