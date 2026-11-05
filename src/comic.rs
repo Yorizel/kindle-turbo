@@ -15,8 +15,11 @@ use std::path::{Path, PathBuf};
 
 pub const PAGE_W: u32 = 1236;
 pub const PAGE_H: u32 = 1648;
-/// e-ink shows 16 grey levels: q55 is indistinguishable there and keeps pages light
-const JPEG_Q: u8 = 55;
+/// e-ink shows 16 grey levels: with mozjpeg trellis, q40 looks the same as q55 there
+/// and makes pages ~20% lighter.
+const JPEG_Q: u8 = 40;
+/// libjpeg input smoothing (0-100): a light touch removes source noise e-ink cannot show.
+const JPEG_SMOOTHING: u8 = 10;
 /// Chapters rendered at once (each already uses every core internally).
 pub const CHAPTERS_IN_FLIGHT: usize = 4;
 const CSS: &str = "@page{margin:0}body{margin:0;padding:0;text-align:center}img{width:100%;height:auto;margin:0;padding:0;display:block}div{page-break-after:always;margin:0;padding:0}";
@@ -138,13 +141,18 @@ fn fit_page(g: GrayImage) -> GrayImage {
     image::imageops::resize(&g, to_u32(new_w), to_u32(new_h), FilterType::Triangle)
 }
 
+/// Grayscale JPEG via mozjpeg: trellis quantisation gives ~25% smaller files than a
+/// baseline encoder at the same quality. Scans are kept sequential (no scan search):
+/// nearly as small, much faster to encode and cheaper for the Kindle to decode.
 fn encode_gray(g: &GrayImage) -> Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    let mut enc = jpeg_encoder::Encoder::new(&mut buf, JPEG_Q);
-    enc.set_optimized_huffman_tables(true);
-    enc.encode(g.as_raw(), u16::try_from(g.width())?, u16::try_from(g.height())?, jpeg_encoder::ColorType::Luma)
-        .map_err(|e| anyhow!("falha ao codificar JPEG: {e}"))?;
-    Ok(buf)
+    let mut c = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_GRAYSCALE);
+    c.set_size(usize::try_from(g.width())?, usize::try_from(g.height())?);
+    c.set_quality(f32::from(JPEG_Q));
+    c.set_smoothing_factor(JPEG_SMOOTHING);
+    c.set_optimize_scans(false);
+    let mut started = c.start_compress(Vec::new())?;
+    started.write_scanlines(g.as_raw())?;
+    Ok(started.finish()?)
 }
 
 /// Wraps `width`-wide grayscale rows in an image; the height comes from the buffer length.
