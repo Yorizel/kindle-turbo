@@ -1,5 +1,5 @@
 //! Look up an official cover online when the book has none.
-//! Sources: AniList (light novels, manhwa) and Open Library (books).
+//! Sources: `AniList` (light novels, manhwa) and Open Library (books).
 
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -14,10 +14,10 @@ fn agent() -> ureq::Agent {
 
 /// Title variants, from most to least specific: "A - Site Name" -> "A", "A: B" -> "A".
 fn variants(title: &str) -> Vec<String> {
-    let mut v = vec![title.trim().to_string()];
+    let mut v = vec![title.trim().to_owned()];
     for sep in [" - ", " – ", ": ", ", ", " (", " ["] {
         if let Some((head, _)) = v.last().unwrap().clone().split_once(sep) {
-            let h = head.trim().to_string();
+            let h = head.trim().to_owned();
             if h.len() >= 4 && !v.contains(&h) {
                 v.push(h);
             }
@@ -56,7 +56,7 @@ fn anilist(a: &ureq::Agent, q: &str, comic: bool) -> Option<String> {
         s
     };
     let best = media.iter().max_by_key(|m| score(m))?;
-    best["coverImage"]["extraLarge"].as_str().or(best["coverImage"]["large"].as_str()).map(str::to_string)
+    best["coverImage"]["extraLarge"].as_str().or(best["coverImage"]["large"].as_str()).map(str::to_owned)
 }
 
 fn openlibrary(a: &ureq::Agent, q: &str, author: Option<&str>) -> Option<String> {
@@ -79,21 +79,19 @@ fn download(a: &ureq::Agent, url: &str) -> Option<Vec<u8>> {
 }
 
 /// Returns (image bytes, source name).
+#[must_use]
 pub fn find(title: &str, author: Option<&str>, comic: bool) -> Option<(Vec<u8>, &'static str)> {
     let a = agent();
     for q in variants(title) {
-        if let Some(url) = anilist(&a, &q, comic) {
-            if let Some(d) = download(&a, &url) {
+        if let Some(url) = anilist(&a, &q, comic)
+            && let Some(d) = download(&a, &url) {
                 return Some((d, "AniList"));
             }
-        }
-        if !comic {
-            if let Some(url) = openlibrary(&a, &q, author) {
-                if let Some(d) = download(&a, &url) {
+        if !comic
+            && let Some(url) = openlibrary(&a, &q, author)
+                && let Some(d) = download(&a, &url) {
                     return Some((d, "Open Library"));
                 }
-            }
-        }
     }
     None
 }

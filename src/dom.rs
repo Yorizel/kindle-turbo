@@ -32,6 +32,7 @@ pub const AID_ABLE: &[&str] = &[
     "video",
 ];
 
+#[must_use]
 pub fn is_aid_able(name: &str) -> bool {
     AID_ABLE.contains(&name)
 }
@@ -48,16 +49,18 @@ fn local<T: AsRef<[u8]> + ?Sized>(name: &T) -> String {
     }
 }
 
+#[must_use]
 pub fn decode_entities(raw: &str) -> String {
     if raw.contains('&') {
         html_escape::decode_html_entities(raw).into_owned()
     } else {
-        raw.to_string()
+        raw.to_owned()
     }
 }
 
 impl Doc {
-    pub fn parse(data: &[u8]) -> Doc {
+    #[must_use]
+    pub fn parse(data: &[u8]) -> Self {
         let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data);
         let text = String::from_utf8_lossy(data);
         let mut r = Reader::from_str(&text);
@@ -68,7 +71,7 @@ impl Doc {
             c.allow_dangling_amp = true;
             c.check_comments = false;
         }
-        let mut doc = Doc { nodes: Vec::new(), root: NIL };
+        let mut doc = Self { nodes: Vec::new(), root: NIL };
         let mut stack: Vec<usize> = Vec::new();
         loop {
             match r.read_event() {
@@ -132,7 +135,7 @@ impl Doc {
     }
 
     pub fn create(&mut self, name: &str, attrs: Vec<(String, String)>) -> usize {
-        self.nodes.push(Node { name: name.to_string(), attrs, parent: NIL, ..Default::default() });
+        self.nodes.push(Node { name: name.to_owned(), attrs, parent: NIL, ..Default::default() });
         self.nodes.len() - 1
     }
 
@@ -160,10 +163,11 @@ impl Doc {
         };
         match target {
             Some(t) => t.push_str(s),
-            None => *target = Some(s.to_string()),
+            None => *target = Some(s.to_owned()),
         }
     }
 
+    #[must_use]
     pub fn attr(&self, id: usize, k: &str) -> Option<&str> {
         self.nodes[id].attrs.iter().find(|(ak, _)| ak == k).map(|(_, v)| v.as_str())
     }
@@ -173,7 +177,7 @@ impl Doc {
         if let Some(slot) = attrs.iter_mut().find(|(ak, _)| ak == k) {
             slot.1 = v;
         } else {
-            attrs.push((k.to_string(), v));
+            attrs.push((k.to_owned(), v));
         }
     }
 
@@ -230,6 +234,7 @@ impl Doc {
     }
 
     /// Pre-order list of descendants (excluding `id`).
+    #[must_use]
     pub fn descendants(&self, id: usize) -> Vec<usize> {
         let mut out = Vec::new();
         let mut stack: Vec<usize> = self.nodes[id].children.iter().rev().copied().collect();
@@ -240,6 +245,7 @@ impl Doc {
         out
     }
 
+    #[must_use]
     pub fn find_first(&self, id: usize, name: &str) -> Option<usize> {
         if self.nodes[id].name == name {
             return Some(id);
@@ -248,6 +254,7 @@ impl Doc {
     }
 
     /// Concatenated text content.
+    #[must_use]
     pub fn text_content(&self, id: usize) -> String {
         let mut s = String::new();
         fn rec(d: &Doc, id: usize, s: &mut String) {
@@ -267,11 +274,10 @@ impl Doc {
 
     pub fn serialize(&self, id: usize, out: &mut Vec<u8>, with_tail: bool) {
         self.ser(id, out, false);
-        if with_tail {
-            if let Some(t) = &self.nodes[id].tail {
+        if with_tail
+            && let Some(t) = &self.nodes[id].tail {
                 escape_text(t, out);
             }
-        }
     }
 
     pub fn serialize_root(&self, out: &mut Vec<u8>) {
@@ -281,6 +287,7 @@ impl Doc {
         }
     }
 
+    #[must_use]
     pub fn to_bytes(&self, id: usize, with_tail: bool) -> Vec<u8> {
         let mut v = Vec::new();
         self.serialize(id, &mut v, with_tail);
@@ -301,7 +308,7 @@ impl Doc {
             escape_attr(v, out);
             out.push(b'"');
         }
-        let empty_text = n.text.as_deref().is_none_or(|t| t.is_empty());
+        let empty_text = n.text.as_deref().is_none_or(str::is_empty);
         if n.children.is_empty() && empty_text {
             if needs_close_tag(&n.name) {
                 out.extend_from_slice(b"></");

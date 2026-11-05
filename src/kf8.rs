@@ -65,18 +65,15 @@ fn build_resources(book: &Book, opts: &Options, warnings: &mut Vec<String>) -> R
         None
     };
     if let Some(c) = opts.cover.as_ref().or(generated.as_ref()) {
-        match &cover_href {
-            Some(h) => {
-                if let Some(slot) = items.iter_mut().find(|(k, _)| k == h) {
-                    slot.1 = c.as_slice();
-                } else {
-                    items.push((h.clone(), c.as_slice()));
-                }
+        if let Some(h) = &cover_href {
+            if let Some(slot) = items.iter_mut().find(|(k, _)| k == h) {
+                slot.1 = c.as_slice();
+            } else {
+                items.push((h.clone(), c.as_slice()));
             }
-            None => {
-                cover_href = Some("__kindle_turbo_cover__".into());
-                items.push(("__kindle_turbo_cover__".into(), c.as_slice()));
-            }
+        } else {
+            cover_href = Some("__kindle_turbo_cover__".into());
+            items.push(("__kindle_turbo_cover__".into(), c.as_slice()));
         }
     }
     let processed: Vec<(String, Result<(Vec<u8>, &'static str)>, Option<Vec<u8>>, Option<Vec<u8>>)> = items
@@ -182,36 +179,33 @@ fn placeholder(n: u64) -> String {
 
 fn process_markup(file_idx: usize, href: &str, data: &[u8], ctx: &Ctx) -> FileState {
     let mut doc = Doc::parse(data);
-    let base = dirname(href).to_string();
+    let base = dirname(href).to_owned();
     let root = doc.root;
     doc.nodes[root].name = "html".into();
     doc.nodes[root].attrs.retain(|(k, _)| k == "lang" || k == "class" || k == "style");
     doc.nodes[root].tail = Some("\n".into());
 
     // ensure <body>
-    let body = match doc.nodes[root].children.iter().copied().find(|&c| doc.nodes[c].name == "body") {
-        Some(b) => b,
-        None => {
-            let b = doc.create("body", vec![]);
-            let kids: Vec<usize> = doc.nodes[root].children.clone();
-            for k in kids {
-                if doc.nodes[k].name != "head" {
-                    doc.remove(k);
-                    doc.append_child(b, k);
-                }
+    let body = if let Some(b) = doc.nodes[root].children.iter().copied().find(|&c| doc.nodes[c].name == "body") { b } else {
+        let b = doc.create("body", vec![]);
+        let kids: Vec<usize> = doc.nodes[root].children.clone();
+        for k in kids {
+            if doc.nodes[k].name != "head" {
+                doc.remove(k);
+                doc.append_child(b, k);
             }
-            if let Some(t) = doc.nodes[root].text.take() {
-                doc.nodes[b].text = Some(t);
-            }
-            doc.append_child(root, b);
-            b
         }
+        if let Some(t) = doc.nodes[root].text.take() {
+            doc.nodes[b].text = Some(t);
+        }
+        doc.append_child(root, b);
+        b
     };
     doc.nodes[body].tail = Some("\n".into());
 
     let mut st = FileState {
         doc,
-        href: href.to_string(),
+        href: href.to_owned(),
         inline_styles: Vec::new(),
         svgs: Vec::new(),
         links: Vec::new(),
@@ -229,14 +223,13 @@ fn process_markup(file_idx: usize, href: &str, data: &[u8], ctx: &Ctx) -> FileSt
         doc.remove_attr(n, "cid");
         let name = doc.nodes[n].name.clone();
         match name.as_str() {
-            "script" => {
-                if doc.nodes[n].text.as_deref().is_none_or(|t| t.trim().is_empty()) && doc.attr(n, "src").is_none() {
+            "script"
+                if doc.nodes[n].text.as_deref().is_none_or(|t| t.trim().is_empty()) && doc.attr(n, "src").is_none() => {
                     doc.extract(n);
                 }
-            }
             "img" | "image" => {
                 for key in ["src", "href"] {
-                    if let Some(v) = doc.attr(n, key).map(str::to_string) {
+                    if let Some(v) = doc.attr(n, key).map(str::to_owned) {
                         if is_external(&v) {
                             continue;
                         }
@@ -251,7 +244,7 @@ fn process_markup(file_idx: usize, href: &str, data: &[u8], ctx: &Ctx) -> FileSt
                 }
             }
             "link" => {
-                if let Some(v) = doc.attr(n, "href").map(str::to_string) {
+                if let Some(v) = doc.attr(n, "href").map(str::to_owned) {
                     let (target, _) = resolve_href(&base, &v);
                     if let Some(&i) = ctx.sheets.get(&target) {
                         doc.set_attr(n, "href", format!("kindle:flow:{}?mime=text/css", to_ref(i)));
@@ -302,7 +295,7 @@ fn process_markup(file_idx: usize, href: &str, data: &[u8], ctx: &Ctx) -> FileSt
             .descendants(n)
             .into_iter()
             .find(|&c| doc.nodes[c].name == "image")
-            .and_then(|c| doc.attr(c, "href").filter(|h| h.starts_with("kindle:embed:")).map(str::to_string));
+            .and_then(|c| doc.attr(c, "href").filter(|h| h.starts_with("kindle:embed:")).map(str::to_owned));
         let img = doc.create("img", vec![]);
         if let Some(src) = embedded {
             doc.set_attr(img, "src", src);
@@ -324,13 +317,13 @@ fn process_markup(file_idx: usize, href: &str, data: &[u8], ctx: &Ctx) -> FileSt
         if doc.nodes[n].name != "a" || doc.nodes[n].parent == NIL {
             continue;
         }
-        let Some(h) = doc.attr(n, "href").map(str::to_string) else { continue };
+        let Some(h) = doc.attr(n, "href").map(str::to_owned) else { continue };
         if is_external(&h) {
             continue;
         }
         let (mut target, frag) = resolve_href(&base, &h);
         if target.is_empty() {
-            target = href.to_string();
+            target = href.to_owned();
         }
         if ctx.spine_set.contains(target.as_str()) {
             count += 1;
@@ -348,14 +341,13 @@ fn process_markup(file_idx: usize, href: &str, data: &[u8], ctx: &Ctx) -> FileSt
         if doc.nodes[n].parent == NIL {
             continue;
         }
-        let mut id = doc.attr(n, "id").map(str::to_string);
+        let mut id = doc.attr(n, "id").map(str::to_owned);
         let name = doc.nodes[n].name.clone();
-        if id.is_none() && name == "a" {
-            if let Some(nm) = doc.attr(n, "name").map(str::to_string) {
+        if id.is_none() && name == "a"
+            && let Some(nm) = doc.attr(n, "name").map(str::to_owned) {
                 doc.set_attr(n, "id", nm.clone());
                 id = Some(nm);
             }
-        }
         if id.is_none() && !is_aid_able(&name) {
             continue;
         }
@@ -437,14 +429,13 @@ impl Chunker<'_> {
                 cut -= 1;
             }
             // don't split an entity
-            if cut < rest.len() {
-                if let Some(amp) = rest[cut.saturating_sub(6)..cut].iter().rposition(|&b| b == b'&') {
+            if cut < rest.len()
+                && let Some(amp) = rest[cut.saturating_sub(6)..cut].iter().rposition(|&b| b == b'&') {
                     let a = cut.saturating_sub(6) + amp;
                     if !rest[a..cut].contains(&b';') && a > 0 {
                         cut = a;
                     }
                 }
-            }
             let piece = &rest[..cut];
             let raw = if first {
                 piece.to_vec()
@@ -462,33 +453,30 @@ impl Chunker<'_> {
     }
 
     fn step_into(&mut self, tag: usize) {
-        let aid = self.doc.attr(tag, "aid").unwrap_or("").to_string();
+        let aid = self.doc.attr(tag, "aid").unwrap_or("").to_owned();
         self.selector = format!("P-//*[@aid='{aid}']");
         let first = self.chunks.len();
-        if let Some(t) = self.doc.nodes[tag].text.clone() {
-            if !is_ws(&t) {
+        if let Some(t) = self.doc.nodes[tag].text.clone()
+            && !is_ws(&t) {
                 self.chunk_up_text(&t);
                 self.doc.nodes[tag].text = None;
             }
-        }
         for child in self.doc.nodes[tag].children.clone() {
             let raw = self.doc.to_bytes(child, false);
             if raw.len() > CHUNK_SIZE && self.doc.attr(child, "aid").is_some() {
                 self.step_into(child);
-                if let Some(t) = self.doc.nodes[child].tail.clone() {
-                    if !is_ws(&t) {
+                if let Some(t) = self.doc.nodes[child].tail.clone()
+                    && !is_ws(&t) {
                         self.chunk_up_text(&t);
                         self.doc.nodes[child].tail = None;
                     }
-                }
             } else {
                 let c = self.new_chunk(raw);
                 self.chunks.push(c);
-                if let Some(t) = self.doc.nodes[child].tail.clone() {
-                    if !t.is_empty() {
+                if let Some(t) = self.doc.nodes[child].tail.clone()
+                    && !t.is_empty() {
                         self.chunk_up_text(&t);
                     }
-                }
                 self.doc.remove(child);
             }
         }
@@ -503,13 +491,12 @@ impl Chunker<'_> {
 fn merge_small_chunks(chunks: Vec<Chunk>) -> Vec<Chunk> {
     let mut ans: Vec<Chunk> = Vec::with_capacity(chunks.len());
     for c in chunks {
-        if let Some(prev) = ans.last_mut() {
-            if !(!c.starts.is_empty() || c.raw.len() + prev.raw.len() > CHUNK_SIZE || !prev.ends.is_empty()) {
+        if let Some(prev) = ans.last_mut()
+            && !(!c.starts.is_empty() || c.raw.len() + prev.raw.len() > CHUNK_SIZE || !prev.ends.is_empty()) {
                 prev.raw.extend_from_slice(&c.raw);
                 prev.ends = c.ends;
                 continue;
             }
-        }
         ans.push(c);
     }
     ans
@@ -517,7 +504,7 @@ fn merge_small_chunks(chunks: Vec<Chunk>) -> Vec<Chunk> {
 
 fn chunk_file(mut st: FileState) -> FileOut {
     // kindlegen always puts the aid last
-    for node in st.doc.nodes.iter_mut() {
+    for node in &mut st.doc.nodes {
         if let Some(p) = node.attrs.iter().position(|(k, _)| k == "aid") {
             let a = node.attrs.remove(p);
             node.attrs.push(a);
@@ -546,7 +533,7 @@ fn chunk_file(mut st: FileState) -> FileOut {
             }
             if let Some(n) = st.doc.descendants(root).into_iter().find(|&n| st.doc.attr(n, "aid") == Some(aid.as_str())) {
                 let raw = st.doc.to_bytes(n, true);
-                let text_len = st.doc.nodes[n].text.as_deref().map(str::len).unwrap_or(0);
+                let text_len = st.doc.nodes[n].text.as_deref().map_or(0, str::len);
                 let open = memchr::memchr(b'>', &raw).unwrap_or(0);
                 let start = open + text_len + 1;
                 let last_lt = memchr::memrchr(b'<', &raw).unwrap_or(0);
@@ -556,14 +543,14 @@ fn chunk_file(mut st: FileState) -> FileOut {
         }
     }
     let mut pos = body_offset;
-    for c in chunks.iter_mut() {
+    for c in &mut chunks {
         for t in &c.starts {
-            pos += metrics.get(t).map(|m| m.0).unwrap_or(0);
+            pos += metrics.get(t).map_or(0, |m| m.0);
         }
         c.insert_pos = pos;
         pos += c.raw.len();
         for t in &c.ends {
-            pos += metrics.get(t).map(|m| m.1).unwrap_or(0);
+            pos += metrics.get(t).map_or(0, |m| m.1);
         }
     }
 
@@ -672,7 +659,7 @@ pub fn convert(book: &Book, opts: &Options) -> Result<Output> {
 
     // phase 2 (sequential, cheap): inline style + svg flows
     let mut inline_map: HashMap<String, usize> = HashMap::new();
-    for st in states.iter_mut() {
+    for st in &mut states {
         for (link, css) in std::mem::take(&mut st.inline_styles) {
             let idx = *inline_map.entry(css.clone()).or_insert_with(|| {
                 flows.push(css.into_bytes());
@@ -689,7 +676,7 @@ pub fn convert(book: &Book, opts: &Options) -> Result<Output> {
 
     let mut id_map: HashMap<(String, String), String> = HashMap::new();
     let mut link_targets: Vec<(u64, String, String)> = Vec::new();
-    for st in states.iter_mut() {
+    for st in &mut states {
         for (id, aid) in std::mem::take(&mut st.ids) {
             id_map.entry((st.href.clone(), id)).or_insert(aid);
         }
@@ -865,10 +852,10 @@ pub fn convert(book: &Book, opts: &Options) -> Result<Output> {
             Some(i) => (&href[..i], &href[i + 1..]),
             None => (href, ""),
         };
-        let aid = id_map.get(&(file.to_string(), frag.to_string())).or_else(|| id_map.get(&(file.to_string(), String::new())));
+        let aid = id_map.get(&(file.to_owned(), frag.to_owned())).or_else(|| id_map.get(&(file.to_owned(), String::new())));
         match aid.and_then(|a| aid_offset.get(a)) {
             Some(&v) => v,
-            None => (0, 0, chunk_table.first().map(|c| c.insert_pos).unwrap_or(0)),
+            None => (0, 0, chunk_table.first().map_or(0, |c| c.insert_pos)),
         }
     };
     struct Flat {
@@ -886,7 +873,7 @@ pub fn convert(book: &Book, opts: &Options) -> Result<Output> {
         for n in nodes {
             let id = flat.len();
             let (pos, fid, offset) = locate(&n.href);
-            let label = if n.title.trim().is_empty() { "Unknown".to_string() } else { n.title.clone() };
+            let label = if n.title.trim().is_empty() { "Unknown".to_owned() } else { n.title.clone() };
             flat.push(Flat { id, label, depth, parent, children: Vec::new(), pos, fid, offset });
             if let Some(p) = parent {
                 flat[p].children.push(id);
@@ -984,13 +971,13 @@ pub fn convert(book: &Book, opts: &Options) -> Result<Output> {
             Some(i) => (&g.href[..i], &g.href[i + 1..]),
             None => (g.href.as_str(), ""),
         };
-        let aid = id_map.get(&(file.to_string(), frag.to_string())).or_else(|| id_map.get(&(file.to_string(), String::new())));
+        let aid = id_map.get(&(file.to_owned(), frag.to_owned())).or_else(|| id_map.get(&(file.to_owned(), String::new())));
         let Some(&(pos, fid, off)) = aid.and_then(|a| aid_offset.get(a)) else { continue };
         let t = g.typ.to_lowercase();
         if g.title.to_lowercase() == "start" || matches!(t.as_str(), "start" | "other.start" | "text") {
             start_offset = Some(off as u32);
         }
-        let title = if g.title.trim().is_empty() { "Unknown".to_string() } else { g.title.clone() };
+        let title = if g.title.trim().is_empty() { "Unknown".to_owned() } else { g.title.clone() };
         guide.push((g.typ.clone(), title, pos, fid));
     }
     guide.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1020,7 +1007,7 @@ pub fn convert(book: &Book, opts: &Options) -> Result<Output> {
     let last_text_record = text_records.len();
     records.extend(text_records.into_iter().map(|r| r.0));
     let mut first_non_text = last_text_record + 1;
-    if records_size % 4 != 0 {
+    if !records_size.is_multiple_of(4) {
         records.push(vec![0; records_size % 4]);
         first_non_text += 1;
     }
@@ -1050,7 +1037,7 @@ pub fn convert(book: &Book, opts: &Options) -> Result<Output> {
     records.push(mobi::fcis(text_length as u32));
     records.push(mobi::EOF_RECORD.to_vec());
 
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let asin = book.meta.uuid.clone().unwrap_or_else(|| pseudo_uuid(&book.meta.title, &book.meta.authors));
     let pubdate = book.meta.date.clone().unwrap_or_else(|| "2000-01-01".into());
     let exth = mobi::build_exth(&mobi::ExthInput {
@@ -1070,7 +1057,7 @@ pub fn convert(book: &Book, opts: &Options) -> Result<Output> {
         has_resources: num_resources > 0,
     });
     let full_title = mobi::utf8_text(&book.meta.title);
-    let uid = (fxhash(asin.as_bytes()) ^ now as u64) as u32;
+    let uid = (fxhash(asin.as_bytes()) ^ now) as u32;
     records[0] = mobi::build_record0(&mobi::Record0Input {
         compression: if opts.compress { 2 } else { 1 },
         text_length: text_length as u32,
@@ -1092,7 +1079,7 @@ pub fn convert(book: &Book, opts: &Options) -> Result<Output> {
         full_title: &full_title,
     });
     if last_text_record > 0xFFFF {
-        anyhow::bail!("livro grande demais para AZW3 ({} registros de texto, máximo 65535)", last_text_record);
+        anyhow::bail!("livro grande demais para AZW3 ({last_text_record} registros de texto, máximo 65535)");
     }
 
     let data = mobi::write_pdb(&book.meta.title, &records, now as u32);
@@ -1102,7 +1089,7 @@ pub fn convert(book: &Book, opts: &Options) -> Result<Output> {
 fn fxhash(b: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &x in b {
-        h ^= x as u64;
+        h ^= u64::from(x);
         h = h.wrapping_mul(0x100000001b3);
     }
     h

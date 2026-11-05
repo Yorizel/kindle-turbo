@@ -58,7 +58,7 @@ fn sanitize(name: &str) -> String {
         .chars()
         .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
         .collect();
-    let s = s.trim().trim_matches('.').to_string();
+    let s = s.trim().trim_matches('.').to_owned();
     let s: String = s.chars().take(150).collect();
     if s.is_empty() { "livro".into() } else { s }
 }
@@ -156,8 +156,7 @@ fn is_epub_zip(p: &Path) -> bool {
     std::fs::File::open(p)
         .ok()
         .and_then(|f| zip::ZipArchive::new(f).ok())
-        .map(|a| a.index_for_name("META-INF/container.xml").is_some())
-        .unwrap_or(false)
+        .is_some_and(|a| a.index_for_name("META-INF/container.xml").is_some())
 }
 
 fn main() -> Result<()> {

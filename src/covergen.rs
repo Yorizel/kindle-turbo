@@ -11,11 +11,10 @@ fn find_font() -> Option<(Vec<u8>, u32)> {
     for pattern in ["Noto Sans CJK KR:bold", "sans:bold", "sans"] {
         if let Ok(o) = std::process::Command::new("fc-match").args(["-f", "%{file}|%{index}", pattern]).output() {
             let s = String::from_utf8_lossy(&o.stdout);
-            if let Some((f, i)) = s.split_once('|') {
-                if let Ok(data) = std::fs::read(f) {
+            if let Some((f, i)) = s.split_once('|')
+                && let Ok(data) = std::fs::read(f) {
                     return Some((data, i.trim().parse().unwrap_or(0)));
                 }
-            }
         }
     }
     for p in [
@@ -37,12 +36,12 @@ fn wrap(font: &FontRef, size: f32, text: &str, max_w: f32) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut cur = String::new();
     for word in text.split_whitespace() {
-        let cand = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
+        let cand = if cur.is_empty() { word.to_owned() } else { format!("{cur} {word}") };
         if width(&cand) <= max_w || cur.is_empty() {
             cur = cand;
         } else {
             lines.push(std::mem::take(&mut cur));
-            cur = word.to_string();
+            cur = word.to_owned();
         }
         // very long single word (e.g. CJK without spaces): hard-break by chars
         while width(&cur) > max_w && cur.chars().count() > 1 {
@@ -83,7 +82,7 @@ fn draw_line(img: &mut RgbImage, font: &FontRef, size: f32, text: &str, y: f32, 
                 if px >= 0 && py >= 0 && (px as u32) < W && (py as u32) < H {
                     let p = img.get_pixel_mut(px as u32, py as u32);
                     for i in 0..3 {
-                        p[i] = (p[i] as f32 * (1.0 - cov) + color[i] as f32 * cov) as u8;
+                        p[i] = f32::from(color[i]).mul_add(cov, f32::from(p[i]) * (1.0 - cov)) as u8;
                     }
                 }
             });
@@ -91,12 +90,13 @@ fn draw_line(img: &mut RgbImage, font: &FontRef, size: f32, text: &str, y: f32, 
     }
 }
 
+#[must_use]
 pub fn generate(title: &str, author: Option<&str>) -> Option<Vec<u8>> {
     let (data, index) = find_font()?;
     let font = FontRef::try_from_slice_and_index(&data, index).ok()?;
     let mut img = RgbImage::from_fn(W, H, |_, y| {
         let t = y as f32 / H as f32;
-        Rgb([(22.0 + 40.0 * t) as u8, (20.0 + 6.0 * t) as u8, (34.0 - 6.0 * t) as u8])
+        Rgb([40.0f32.mul_add(t, 22.0) as u8, 6.0f32.mul_add(t, 20.0) as u8, 6.0f32.mul_add(-t, 34.0) as u8])
     });
     // frame
     for m in [24u32, 30] {
@@ -118,14 +118,14 @@ pub fn generate(title: &str, author: Option<&str>) -> Option<Vec<u8>> {
     }
     let lh = size * 1.18;
     let block = lh * lines.len() as f32;
-    let mut y = (H as f32 * 0.42 - block / 2.0).max(70.0);
+    let mut y = (H as f32).mul_add(0.42, -(block / 2.0)).max(70.0);
     for l in &lines {
         draw_line(&mut img, &font, size, l, y, [240, 232, 215]);
         y += lh;
     }
     if let Some(a) = author.filter(|a| !a.trim().is_empty()) {
         let al = wrap(&font, 30.0, a, max_w);
-        let mut ay = H as f32 - 110.0 - 36.0 * (al.len().saturating_sub(1)) as f32;
+        let mut ay = 36.0f32.mul_add(-((al.len().saturating_sub(1)) as f32), H as f32 - 110.0);
         for l in al.iter().take(2) {
             draw_line(&mut img, &font, 30.0, l, ay, [190, 160, 110]);
             ay += 36.0;

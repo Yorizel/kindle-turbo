@@ -111,7 +111,7 @@ fn scale_to_width(g: GrayImage, w: u32) -> GrayImage {
     if g.width() == w {
         return g;
     }
-    let h = ((g.height() as u64 * w as u64) / g.width() as u64).max(1) as u32;
+    let h = ((u64::from(g.height()) * u64::from(w)) / u64::from(g.width())).max(1) as u32;
     image::imageops::resize(&g, w, h, FilterType::Triangle)
 }
 
@@ -120,8 +120,8 @@ fn fit_page(g: GrayImage) -> GrayImage {
     if w <= PAGE_W && h <= PAGE_H {
         return g;
     }
-    let s = (PAGE_W as f64 / w as f64).min(PAGE_H as f64 / h as f64);
-    image::imageops::resize(&g, ((w as f64 * s) as u32).max(1), ((h as f64 * s) as u32).max(1), FilterType::Triangle)
+    let s = (f64::from(PAGE_W) / f64::from(w)).min(f64::from(PAGE_H) / f64::from(h));
+    image::imageops::resize(&g, ((f64::from(w) * s) as u32).max(1), ((f64::from(h) * s) as u32).max(1), FilterType::Triangle)
 }
 
 fn encode_gray(g: &GrayImage) -> Vec<u8> {
@@ -182,7 +182,7 @@ fn render_chapter(images: &[&(String, Vec<u8>)]) -> Vec<Vec<u8>> {
     for batch in images.chunks(BATCH) {
         let decoded: Vec<Option<GrayImage>> = batch.par_iter().map(|(_, d)| decode_gray(d)).collect();
         for g in decoded.into_iter().flatten() {
-            let strip = g.height() as f64 / g.width() as f64 > 1.9;
+            let strip = f64::from(g.height()) / f64::from(g.width()) > 1.9;
             if !strip {
                 // regular page: flush pending strip first
                 if !carry.is_empty() {
@@ -223,7 +223,7 @@ pub fn open(input: &Path, title: Option<&str>) -> Result<Book> {
     // group by parent folder => chapters
     let mut chapters_raw: Vec<(String, Vec<&(String, Vec<u8>)>)> = Vec::new();
     for it in &items {
-        let dir = it.0.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+        let dir = it.0.rsplit_once('/').map(|(d, _)| d.to_owned()).unwrap_or_default();
         match chapters_raw.last_mut() {
             Some((d, v)) if *d == dir => v.push(it),
             _ => chapters_raw.push((dir, vec![it])),
@@ -236,17 +236,17 @@ pub fn open(input: &Path, title: Option<&str>) -> Result<Book> {
         .enumerate()
         .map(|(i, (dir, imgs))| Chapter {
             title: if multi {
-                dir.rsplit('/').next().filter(|s| !s.is_empty()).map(str::to_string).unwrap_or(format!("Capítulo {}", i + 1))
+                dir.rsplit('/').next().filter(|s| !s.is_empty()).map(str::to_owned).unwrap_or(format!("Capítulo {}", i + 1))
             } else {
-                "Início".to_string()
+                "Início".to_owned()
             },
             pages: render_chapter(imgs),
         })
         .collect();
 
-    let name = title.map(str::to_string).unwrap_or_else(|| {
-        input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Manhwa".into())
-    });
+    let name = title.map_or_else(|| {
+        input.file_stem().map_or_else(|| "Manhwa".into(), |s| s.to_string_lossy().into_owned())
+    }, str::to_owned);
 
     let mut files: HashMap<String, Vec<u8>> = HashMap::new();
     let mut manifest = Vec::new();

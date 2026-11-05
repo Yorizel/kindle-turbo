@@ -20,6 +20,7 @@ pub enum Kind {
     Other,
 }
 
+#[must_use]
 pub fn sniff(d: &[u8]) -> Kind {
     if d.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Kind::Jpeg
@@ -48,6 +49,7 @@ pub fn process(data: &[u8]) -> Result<(Vec<u8>, &'static str)> {
     Ok((encode_jpeg(&img, JPEG_QUALITY)?, "image/jpeg"))
 }
 
+#[must_use]
 pub fn fit(img: DynamicImage, w: u32, h: u32) -> DynamicImage {
     let (iw, ih) = img.dimensions();
     if iw <= w && ih <= h {
@@ -62,9 +64,9 @@ pub fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>> {
         let rgba = img.to_rgba8();
         let mut out = image::RgbImage::new(rgba.width(), rgba.height());
         for (o, p) in out.pixels_mut().zip(rgba.pixels()) {
-            let a = p[3] as u32;
+            let a = u32::from(p[3]);
             for c in 0..3 {
-                o[c] = ((p[c] as u32 * a + 255 * (255 - a)) / 255) as u8;
+                o[c] = ((u32::from(p[c]) * a + 255 * (255 - a)) / 255) as u8;
             }
         }
         out
@@ -94,6 +96,7 @@ pub fn thumbnail(data: &[u8], w: u32, h: u32, max_bytes: usize) -> Result<Vec<u8
 
 /// The Kindle renderer can't show JPEGs without a JFIF APP0 segment and hides
 /// covers that carry EXIF. Patch the markers without re-encoding.
+#[must_use]
 pub fn fix_jpeg_markers(d: &[u8]) -> Vec<u8> {
     let mut segs: Vec<(usize, usize)> = Vec::new(); // (start, end) of segments before SOS
     let mut has_jfif = false;

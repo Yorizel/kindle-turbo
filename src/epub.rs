@@ -18,7 +18,7 @@ pub struct ManItem {
 pub struct TocNode {
     pub title: String,
     pub href: String, // full path, may contain #frag
-    pub children: Vec<TocNode>,
+    pub children: Vec<Self>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +52,7 @@ pub struct Book {
     pub warnings: Vec<String>,
 }
 
+#[must_use]
 pub fn dirname(p: &str) -> &str {
     match p.rfind('/') {
         Some(i) => &p[..i],
@@ -60,6 +61,7 @@ pub fn dirname(p: &str) -> &str {
 }
 
 /// Resolve `rel` (an href, possibly percent-encoded, without fragment) against directory `base`.
+#[must_use]
 pub fn resolve(base: &str, rel: &str) -> String {
     let rel = percent_encoding::percent_decode_str(rel).decode_utf8_lossy();
     let mut parts: Vec<&str> = if rel.starts_with('/') || base.is_empty() {
@@ -80,6 +82,7 @@ pub fn resolve(base: &str, rel: &str) -> String {
 }
 
 /// Split an href into (resolved path, fragment).
+#[must_use]
 pub fn resolve_href(base: &str, href: &str) -> (String, String) {
     let (p, f) = match href.find('#') {
         Some(i) => (&href[..i], &href[i + 1..]),
@@ -92,6 +95,7 @@ pub fn resolve_href(base: &str, href: &str) -> (String, String) {
     (resolve(base, p), frag)
 }
 
+#[must_use]
 pub fn is_external(href: &str) -> bool {
     let h = href.trim_start();
     h.starts_with("http:") || h.starts_with("https:") || h.starts_with("mailto:") || h.starts_with("data:") || h.starts_with("kindle:")
@@ -144,11 +148,11 @@ pub fn open(bytes: &[u8]) -> Result<Book> {
     let opf_path = cdoc
         .descendants(cdoc.root)
         .into_iter()
-        .find_map(|n| (cdoc.nodes[n].name == "rootfile").then(|| cdoc.attr(n, "full-path").map(str::to_string)).flatten())
+        .find_map(|n| (cdoc.nodes[n].name == "rootfile").then(|| cdoc.attr(n, "full-path").map(str::to_owned)).flatten())
         .ok_or_else(|| anyhow!("no rootfile in container.xml"))?;
     let opf_path = resolve("", &opf_path);
     let opf = Doc::parse(files.get(&opf_path).ok_or_else(|| anyhow!("missing OPF {opf_path}"))?);
-    let base = dirname(&opf_path).to_string();
+    let base = dirname(&opf_path).to_owned();
 
     let mut meta = Meta::default();
     let mut cover_id: Option<String> = None;
@@ -160,7 +164,7 @@ pub fn open(bytes: &[u8]) -> Result<Book> {
     for n in opf.descendants(opf.root) {
         let name = opf.nodes[n].name.as_str();
         let parent = opf.nodes[n].parent;
-        let pname = if parent != NIL { opf.nodes[parent].name.as_str() } else { "" };
+        let pname = if parent == NIL { "" } else { opf.nodes[parent].name.as_str() };
         match name {
             "title" if pname == "metadata" && meta.title.is_empty() => meta.title = clean(&opf.text_content(n)),
             "creator" if pname == "metadata" => {
@@ -171,7 +175,7 @@ pub fn open(bytes: &[u8]) -> Result<Book> {
             }
             "language" if pname == "metadata" && meta.language.is_empty() => meta.language = clean(&opf.text_content(n)),
             "publisher" if pname == "metadata" => meta.publisher = Some(clean(&opf.text_content(n))),
-            "description" if pname == "metadata" => meta.description = Some(opf.text_content(n).trim().to_string()),
+            "description" if pname == "metadata" => meta.description = Some(opf.text_content(n).trim().to_owned()),
             "subject" if pname == "metadata" => meta.subjects.push(clean(&opf.text_content(n))),
             "date" if pname == "metadata" && meta.date.is_none() => meta.date = Some(clean(&opf.text_content(n))),
             "identifier" if pname == "metadata" => {
@@ -179,34 +183,34 @@ pub fn open(bytes: &[u8]) -> Result<Book> {
                 let scheme = opf.attr(n, "scheme").unwrap_or("").to_lowercase();
                 let lv = v.to_lowercase();
                 if lv.starts_with("urn:uuid:") || scheme == "uuid" {
-                    meta.uuid.get_or_insert_with(|| v.rsplit(':').next().unwrap_or(&v).to_string());
+                    meta.uuid.get_or_insert_with(|| v.rsplit(':').next().unwrap_or(&v).to_owned());
                 } else if lv.starts_with("urn:isbn:") {
                     meta.isbn = Some(v[9..].to_string());
                 } else if scheme == "isbn" {
                     meta.isbn = Some(v);
                 }
             }
-            "meta" if opf.attr(n, "name") == Some("cover") => cover_id = opf.attr(n, "content").map(str::to_string),
+            "meta" if opf.attr(n, "name") == Some("cover") => cover_id = opf.attr(n, "content").map(str::to_owned),
             "item" if pname == "manifest" => {
                 let href = opf.attr(n, "href").unwrap_or("");
                 manifest.push(ManItem {
-                    id: opf.attr(n, "id").unwrap_or("").to_string(),
+                    id: opf.attr(n, "id").unwrap_or("").to_owned(),
                     href: resolve_href(&base, href).0,
                     media_type: opf.attr(n, "media-type").unwrap_or("").to_lowercase(),
-                    properties: opf.attr(n, "properties").unwrap_or("").to_string(),
+                    properties: opf.attr(n, "properties").unwrap_or("").to_owned(),
                 });
             }
-            "spine" => toc_id = opf.attr(n, "toc").map(str::to_string),
+            "spine" => toc_id = opf.attr(n, "toc").map(str::to_owned),
             "itemref" => {
                 if let Some(id) = opf.attr(n, "idref") {
-                    spine_ids.push(id.to_string());
+                    spine_ids.push(id.to_owned());
                 }
             }
             "reference" if pname == "guide" => {
                 let (p, f) = resolve_href(&base, opf.attr(n, "href").unwrap_or(""));
                 guide.push(GuideRef {
-                    typ: opf.attr(n, "type").unwrap_or("").to_string(),
-                    title: opf.attr(n, "title").unwrap_or("").to_string(),
+                    typ: opf.attr(n, "type").unwrap_or("").to_owned(),
+                    title: opf.attr(n, "title").unwrap_or("").to_owned(),
                     href: if f.is_empty() { p } else { format!("{p}#{f}") },
                 });
             }
@@ -242,7 +246,7 @@ pub fn open(bytes: &[u8]) -> Result<Book> {
     }
     if cover.is_none() {
         // cover page: guide type=cover, or first spine page; use its single image
-        let mut pages: Vec<String> = guide.iter().filter(|g| g.typ.eq_ignore_ascii_case("cover")).map(|g| g.href.split('#').next().unwrap_or("").to_string()).collect();
+        let mut pages: Vec<String> = guide.iter().filter(|g| g.typ.eq_ignore_ascii_case("cover")).map(|g| g.href.split('#').next().unwrap_or("").to_owned()).collect();
         pages.extend(spine.first().cloned());
         for p in pages {
             let Some(data) = files.get(&p) else { continue };
@@ -274,20 +278,17 @@ pub fn open(bytes: &[u8]) -> Result<Book> {
             toc = parse_ncx_points(&d, nm, dirname(p));
         }
     }
-    if toc.is_empty() {
-        if let Some(m) = manifest.iter().find(|m| m.properties.split_whitespace().any(|p| p == "nav")) {
-            if let Some(data) = files.get(&m.href) {
+    if toc.is_empty()
+        && let Some(m) = manifest.iter().find(|m| m.properties.split_whitespace().any(|p| p == "nav"))
+            && let Some(data) = files.get(&m.href) {
                 let d = Doc::parse(data);
                 let navs: Vec<usize> = d.descendants(d.root).into_iter().filter(|&n| d.nodes[n].name == "nav").collect();
                 let nav = navs.iter().copied().find(|&n| d.attr(n, "type") == Some("toc")).or(navs.first().copied());
-                if let Some(nav) = nav {
-                    if let Some(ol) = d.find_first(nav, "ol") {
+                if let Some(nav) = nav
+                    && let Some(ol) = d.find_first(nav, "ol") {
                         toc = parse_nav_ol(&d, ol, dirname(&m.href));
                     }
-                }
             }
-        }
-    }
     if toc.is_empty() {
         warnings.push("livro sem sumário (TOC)".into());
     }

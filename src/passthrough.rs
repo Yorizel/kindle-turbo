@@ -37,7 +37,7 @@ pub fn read(data: &[u8]) -> Result<Info> {
     let mut title = r0.get(title_off..title_off + title_len).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
 
     let mut asin = None;
-    let mut cdetype = "EBOK".to_string();
+    let mut cdetype = "EBOK".to_owned();
     let mut cover: Option<usize> = None;
     let mut thumb: Option<usize> = None;
     let exth = 16 + hlen;
