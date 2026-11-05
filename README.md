@@ -59,6 +59,21 @@ Opções:
 | `--check` | só verifica arquivos AZW3 |
 | `--koreader` | para KOReader: manhwa vira **um CBZ por capítulo** em `documents/Manhwas/<Série>/` (lê passando a página); EPUB vai como está para `documents/Novels` |
 
+## AsuraScans
+
+O CLI Rust oferece busca, lista de capítulos e download em CBZ, com até quatro imagens em paralelo e retomada dos capítulos concluídos. Capítulos bloqueados e imagens embaralhadas são indicados como indisponíveis.
+
+```sh
+kindle-turbo asura search "solo leveling" --page 1
+kindle-turbo asura chapters solo-leveling
+kindle-turbo asura download solo-leveling --all -o downloads
+kindle-turbo asura download solo-leveling --from 1 --to 5 -o downloads --kindle /mount/Kindle
+```
+
+No Kindle, o plugin KOReader em `koplugin/kindle-turbo.koplugin/` oferece busca, catálogo, download de todos os capítulos e leitura offline com escolha da pasta destino. A leitura usa o ReaderUI nativo do KOReader, que guarda o progresso. Para instalar por USB, execute `scripts/install-koplugin.sh /mount/Kindle`; o instalador exige a raiz reconhecível do Kindle, valida `documents` e `koreader/plugins`, não sobrescreve nada e instala também os avisos de licença e proveniência. Ejete o Kindle com segurança após a cópia.
+
+O plugin também roda no KOReader para Linux, permitindo baixar no PC e copiar os CBZ para o Kindle. Os testes usam os módulos reais do KOReader no PC; a validação no Kindle físico ainda está pendente. Veja [o guia PC/Kindle](docs/asura.md) e [as atribuições](docs/licensing.md).
+
 Depois de usar `--kindle`, ejete antes de desconectar:
 
 ```sh
@@ -70,7 +85,7 @@ udisksctl unmount -b /dev/disk/by-label/Kindle && udisksctl power-off -b /dev/di
 - `unsafe` proibido (`forbid(unsafe_code)`).
 - Clippy `all` + `pedantic` + `nursery` + `cargo` + regras de `restriction` (sem `unwrap`/`expect`/`panic` fora de testes), tudo como erro. Zero `#[allow]` no código de produção.
 - Compressão PalmDOC com parsing ótimo (programação dinâmica), não gulosa.
-- Testes sem mock: EPUBs e imagens reais gerados no teste, convertidos e decodificados de volta pelo leitor KF8 próprio; testes de propriedade (proptest) na compressão; o binário real é executado nos testes de CLI. Testes com livros reais e com o AniList de verdade: `cargo test -- --ignored`.
+- Testes do conversor: EPUBs e imagens reais gerados no teste, convertidos e decodificados de volta pelo leitor KF8 próprio; testes de propriedade (proptest) na compressão; o binário real é executado nos testes de CLI. Testes com livros reais e com o AniList de verdade: `cargo test -- --ignored`.
 - CI local: `./ci.sh` (fmt, clippy `-D warnings`, testes) e `./ci.sh --full` (inclui livros reais e AniList). O mesmo roda no GitHub Actions.
 
 ## Limitações

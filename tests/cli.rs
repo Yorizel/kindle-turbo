@@ -61,3 +61,18 @@ fn help_works() {
     assert!(st.status.success());
     assert!(String::from_utf8_lossy(&st.stdout).contains("--kindle"));
 }
+
+#[test]
+fn asura_commands_validate_selection_before_network_access() {
+    let help = Command::new(BIN).args(["asura", "download", "--help"]).output().unwrap();
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--kindle"));
+    for args in [
+        vec!["asura", "download", "fixture"],
+        vec!["asura", "download", "fixture", "--from", "2", "--to", "1"],
+        vec!["asura", "download", "fixture", "--all", "--from", "1"],
+        vec!["asura", "search", "--page", "0"],
+    ] {
+        assert!(!Command::new(BIN).args(args).output().unwrap().status.success());
+    }
+}
