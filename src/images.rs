@@ -43,7 +43,7 @@ pub fn process(data: &[u8]) -> Result<(Vec<u8>, &'static str)> {
     if data.len() <= MAX_IMAGE_BYTES {
         match k {
             Kind::Jpeg => return Ok((fix_jpeg_markers(data), "image/jpeg")),
-            Kind::Png => return Ok((data.to_vec(), "image/png")),
+            Kind::Png => return Ok((optimize_png(data), "image/png")),
             Kind::Gif => return Ok((data.to_vec(), "image/gif")),
             Kind::Other => {}
         }
@@ -87,9 +87,19 @@ pub fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>> {
     let width = u16::try_from(rgb.width()).map_err(|_| anyhow!("jpeg: largura excede 65535"))?;
     let height = u16::try_from(rgb.height()).map_err(|_| anyhow!("jpeg: altura excede 65535"))?;
     let mut buf = Vec::new();
-    let enc = jpeg_encoder::Encoder::new(&mut buf, quality);
+    let mut enc = jpeg_encoder::Encoder::new(&mut buf, quality);
+    enc.set_optimized_huffman_tables(true);
     enc.encode(rgb.as_raw(), width, height, jpeg_encoder::ColorType::Rgb).map_err(|e| anyhow!("jpeg: {e}"))?;
     Ok(buf)
+}
+
+/// Lossless PNG optimisation (oxipng). Falls back to the original bytes.
+#[must_use]
+pub fn optimize_png(data: &[u8]) -> Vec<u8> {
+    let mut opts = oxipng::Options::from_preset(2);
+    // pixels are untouched; metadata chunks are useless on the Kindle
+    opts.strip = oxipng::StripChunks::Safe;
+    oxipng::optimize_from_memory(data, &opts).ok().filter(|o| o.len() < data.len()).unwrap_or_else(|| data.to_vec())
 }
 
 /// Cover thumbnail for the Kindle library (<= 16 KiB).

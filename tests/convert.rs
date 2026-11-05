@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Chapter, EpubSpec, build_epub, encode, picture, prose};
-use image::ImageFormat;
+use image::{ImageEncoder, ImageFormat};
 use kindle_turbo::{epub, kf8, passthrough, reader};
 
 fn convert(spec: &EpubSpec, compress: bool) -> (kf8::Output, reader::Azw3) {
@@ -290,4 +290,32 @@ fn malformed_html_is_tolerated() {
 fn not_an_epub_is_an_error() {
     assert!(epub::open(b"definitely not a zip").is_err());
     assert!(reader::read(b"nope").is_err());
+}
+
+#[test]
+fn png_is_optimized_losslessly() {
+    let mut spec = novel(1, 2);
+    // noisy-free flat PNG written without compression effort: big, very compressible
+    let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(800, 600, |x, _| {
+        image::Rgb([u8::try_from(x / 4 % 256).unwrap(), 10, 200])
+    }));
+    let mut raw = std::io::Cursor::new(Vec::new());
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut raw,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::NoFilter,
+    )
+    .write_image(img.as_bytes(), 800, 600, image::ExtendedColorType::Rgb8)
+    .unwrap();
+    let raw = raw.into_inner();
+    spec.images = vec![("Images/p.png".into(), raw.clone(), "image/png".into())];
+    spec.chapters[0].body.push_str(r#"<p><img src="../Images/p.png"/></p>"#);
+    let (_, azw) = convert(&spec, true);
+    let s = String::from_utf8_lossy(&azw.files[0]).into_owned();
+    let r = &s.split("kindle:embed:").nth(1).unwrap()[..4];
+    let out = azw.resource(usize::from_str_radix(r, 32).unwrap() - 1).unwrap();
+    assert!(out.len() < raw.len(), "png not optimized: {} >= {}", out.len(), raw.len());
+    let a = image::load_from_memory(&raw).unwrap().to_rgb8();
+    let b = image::load_from_memory(out).unwrap().to_rgb8();
+    assert_eq!(a, b, "optimization must be lossless");
 }

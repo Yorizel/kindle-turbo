@@ -136,8 +136,9 @@ fn fit_page(g: GrayImage) -> GrayImage {
 
 fn encode_gray(g: &GrayImage) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
-    jpeg_encoder::Encoder::new(&mut buf, JPEG_Q)
-        .encode(g.as_raw(), u16::try_from(g.width())?, u16::try_from(g.height())?, jpeg_encoder::ColorType::Luma)
+    let mut enc = jpeg_encoder::Encoder::new(&mut buf, JPEG_Q);
+    enc.set_optimized_huffman_tables(true);
+    enc.encode(g.as_raw(), u16::try_from(g.width())?, u16::try_from(g.height())?, jpeg_encoder::ColorType::Luma)
         .map_err(|e| anyhow!("falha ao codificar JPEG: {e}"))?;
     Ok(buf)
 }
