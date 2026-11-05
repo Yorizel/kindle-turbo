@@ -1,4 +1,4 @@
 return {
-    fullname = "Kindle Turbo · AsuraScans",
-    description = "Busca e download de manhwas AsuraScans em CBZ, com leitura nativa do KOReader.",
+    fullname = "Kindle Turbo",
+    description = "Busca e download de mangás AsuraScans e WeebCentral em CBZ, com leitura nativa do KOReader.",
 }

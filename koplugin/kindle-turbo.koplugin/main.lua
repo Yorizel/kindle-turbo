@@ -15,6 +15,7 @@ local JSON = require("json")
 local natural = require("sort").natsort_cmp()
 local PluginShare = require("pluginshare")
 local Source = require("kindleturboasura")
+local WeebCentral = require("kindleturboweebcentral")
 
 local Turbo = WidgetContainer:extend{ name = "kindle_turbo", is_doc_only = false }
 
@@ -34,15 +35,22 @@ function Turbo:message(text)
 end
 
 function Turbo:addToMainMenu(items)
+    local entries = {}
+    for _, source in ipairs({Source, WeebCentral}) do
+        entries[#entries + 1] = {
+            text = source.name,
+            sub_item_table = {
+                { text = "Buscar manhwa", callback = function() self:searchDialog(source) end },
+                { text = "Catálogo", callback = function() self:catalog("", 1, source) end },
+            },
+        }
+    end
+    entries[#entries + 1] = { text = "Downloads / ler offline", callback = function() self:library() end }
+    entries[#entries + 1] = { text = "Pasta dos downloads", callback = function() self:downloadDirectory() end }
     items.kindle_turbo = {
-        text = "Kindle Turbo · AsuraScans",
+        text = "Kindle Turbo",
         sorting_hint = "more_tools",
-        sub_item_table = {
-            { text = "Buscar manhwa", callback = function() self:searchDialog() end },
-            { text = "Catálogo AsuraScans", callback = function() self:catalog("", 1) end },
-            { text = "Downloads / ler offline", callback = function() self:library() end },
-            { text = "Pasta dos downloads", callback = function() self:downloadDirectory() end },
-        },
+        sub_item_table = entries,
     }
 end
 
@@ -59,16 +67,17 @@ function Turbo:showMenu(title, items)
     return menu
 end
 
-function Turbo:searchDialog()
+function Turbo:searchDialog(source)
+    source = source or Source
     local dialog
     dialog = InputDialog:new{
-        title = "Buscar no AsuraScans", input = "",
+        title = "Buscar no " .. source.name, input = "",
         buttons = {{
             { text = "Cancelar", callback = function() UIManager:close(dialog) end },
             { text = "Buscar", is_enter_default = true, callback = function()
                 local query = dialog:getInputText()
                 UIManager:close(dialog)
-                self:catalog(query, 1)
+                self:catalog(query, 1, source)
             end },
         }},
     }
@@ -76,32 +85,36 @@ function Turbo:searchDialog()
     dialog:onShowKeyboard()
 end
 
-function Turbo:catalog(query, page)
+function Turbo:catalog(query, page, source)
+    source = source or Source
     NetworkMgr:runWhenConnected(function()
-        local list, err, more = Source.search(query, page)
+        local list, err, more = source.search(query, page)
         if not list then self:message(err); return end
         local items = {}
         for _, manga in ipairs(list) do
-            items[#items + 1] = { text = manga.title, callback = function() self:chapters(manga.slug) end }
+            items[#items + 1] = { text = manga.title, callback = function() self:chapters(manga.slug, source) end }
         end
         local menu
         if page > 1 then
-            items[#items + 1] = { text = "← Página anterior", callback = function() UIManager:close(menu); self:catalog(query, page - 1) end }
+            items[#items + 1] = { text = "← Página anterior", callback = function() UIManager:close(menu); self:catalog(query, page - 1, source) end }
         end
         if more then
-            items[#items + 1] = { text = "Próxima página →", callback = function() UIManager:close(menu); self:catalog(query, page + 1) end }
+            items[#items + 1] = { text = "Próxima página →", callback = function() UIManager:close(menu); self:catalog(query, page + 1, source) end }
         end
         if #items == 0 then self:message("Nenhum resultado"); return end
-        menu = self:showMenu("AsuraScans · página " .. page, items)
+        menu = self:showMenu(source.name .. " · página " .. page, items)
     end)
 end
 
 function Turbo:chapterPath(details, chapter)
-    return self.root .. "/" .. filename(details.title) .. " [" .. details.slug .. "]/Capítulo " .. tostring(chapter.number) .. ".cbz"
+    local source = details.source or Source
+    local namespace = source == Source and details.slug or (source.id .. "-" .. details.slug)
+    local name = source == Source and ("Capítulo " .. tostring(chapter.number)) or (filename(chapter.title) .. " [" .. chapter.id .. "]")
+    return self.root .. "/" .. filename(details.title) .. " [" .. namespace .. "]/" .. name .. ".cbz"
 end
 
 function Turbo:chapterURL(details, chapter)
-    return Source.site .. "/series/" .. details.slug .. "/chapter/" .. tostring(chapter.number)
+    return (details.source or Source).chapterURL(details, chapter)
 end
 
 function Turbo:archiveValid(path, expected_url)
@@ -129,11 +142,13 @@ function Turbo:archiveValid(path, expected_url)
     return not err and type(manifest) == "table" and manifest.chapter_url == expected_url and count > 0 and manifest.pages == count
 end
 
-function Turbo:chapters(slug)
+function Turbo:chapters(slug, source)
+    source = source or Source
     NetworkMgr:runWhenConnected(function()
-        local chapters, err, details = Source.chapters(slug)
+        local chapters, err, details = source.chapters(slug)
         if not chapters then self:message(err); return end
-        details.slug = slug
+        details.slug = details.slug or slug
+        details.source = source
         local items = {{ text = "Baixar todos os capítulos públicos", callback = function()
             UIManager:show(ConfirmBox:new{
                 text = "Baixar todos os capítulos públicos? Os CBZ concluídos serão mantidos. Pode demorar e ocupar bastante espaço.",
@@ -144,10 +159,10 @@ function Turbo:chapters(slug)
             local chapter = chapters[index]
             local path = self:chapterPath(details, chapter)
             items[#items + 1] = {
-                text = (Source.locked(chapter) and "[bloqueado] " or "") .. "Capítulo " .. tostring(chapter.number) .. " · " .. (chapter.title or ""),
+                text = (source.locked(chapter) and "[bloqueado] " or "") .. (chapter.label or ("Capítulo " .. tostring(chapter.number) .. " · " .. (chapter.title or ""))),
                 callback = function()
                     if lfs.attributes(path, "mode") == "file" then self:openBook(path)
-                    elseif Source.locked(chapter) then self:message("Capítulo bloqueado no AsuraScans")
+                    elseif source.locked(chapter) then self:message("Capítulo bloqueado no " .. source.name)
                     else self:startDownloads(details, {chapter}, true) end
                 end,
             }
@@ -215,6 +230,7 @@ function Turbo:startDownloads(details, chapters, open_after)
         if self.job then self:message("Já há um download em andamento"); return end
         self.job = {
             details = details, chapters = chapters, index = 0, archive = archive,
+            source = details.source or Source,
             open_after = open_after, saved = 0, previous_pause = PluginShare.pause_auto_suspend,
         }
         PluginShare.pause_auto_suspend = true
@@ -254,7 +270,7 @@ function Turbo:nextChapter()
     job.index = job.index + 1
     local chapter = job.chapters[job.index]
     if not chapter then self:finishDownload(); return end
-    if Source.locked(chapter) then self:nextChapter(); return end
+    if job.source.locked(chapter) then self:nextChapter(); return end
     job.path = self:chapterPath(job.details, chapter)
     if lfs.attributes(job.path, "mode") == "file" then
         if not self:archiveValid(job.path, self:chapterURL(job.details, chapter)) then
@@ -263,10 +279,10 @@ function Turbo:nextChapter()
         UIManager:scheduleIn(0.1, function() if self.job == job then self:nextChapter() end end)
         return
     end
-    self:progress("Preparando capítulo " .. chapter.number)
+    self:progress("Preparando " .. (chapter.label or ("capítulo " .. tostring(chapter.number))))
     UIManager:scheduleIn(1, function()
         if self.job ~= job then return end
-        local pages, err = Source.pages(job.details.public_url, chapter.number)
+        local pages, err = job.source.pages(job.details.public_url, chapter.number, chapter)
         if not pages then self:finishDownload(err); return end
         job.pages, job.page = pages, 0
         local created, reason = util.makePath(job.path:match("^(.*)/"))
@@ -289,7 +305,7 @@ function Turbo:nextPage()
     local url = job.pages[job.page]
     if not url then
         if not job.writer:addFileFromMemory("kindle-turbo.json", JSON.encode{
-            source = "asurascans", chapter_url = self:chapterURL(job.details, job.chapters[job.index]), pages = #job.pages,
+            source = job.source.id, chapter_url = self:chapterURL(job.details, job.chapters[job.index]), pages = #job.pages,
         }) then self:finishDownload("Falha ao gravar metadados do capítulo"); return end
         job.writer:close()
         job.writer = nil
@@ -303,10 +319,11 @@ function Turbo:nextPage()
         UIManager:scheduleIn(1, function() if self.job == job then self:nextChapter() end end)
         return
     end
-    self:progress("Capítulo " .. job.chapters[job.index].number .. " · página " .. job.page .. "/" .. #job.pages)
+    local chapter = job.chapters[job.index]
+    self:progress((chapter.label or ("Capítulo " .. tostring(chapter.number))) .. " · página " .. job.page .. "/" .. #job.pages)
     UIManager:scheduleIn(1, function()
         if self.job ~= job then return end
-        local body, err = Source.get(url)
+        local body, err = job.source.get(url, true)
         if not body then self:finishDownload(err); return end
         local extension
         extension, err = Source.imageExtension(body)

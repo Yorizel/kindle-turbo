@@ -59,18 +59,22 @@ Opções:
 | `--check` | só verifica arquivos AZW3 |
 | `--koreader` | para KOReader: manhwa vira **um CBZ por capítulo** em `documents/Manhwas/<Série>/` (lê passando a página); EPUB vai como está para `documents/Novels` |
 
-## AsuraScans
+## Fontes online: AsuraScans e WeebCentral
 
-O CLI Rust oferece busca, lista de capítulos e download em CBZ, com até quatro imagens em paralelo e retomada dos capítulos concluídos. Capítulos bloqueados e imagens embaralhadas são indicados como indisponíveis.
+O CLI Rust oferece busca, lista de capítulos e download em CBZ nas duas fontes, com retomada dos capítulos concluídos. AsuraScans baixa até quatro imagens em paralelo; WeebCentral mantém uma requisição a cada dois segundos. Capítulos bloqueados e imagens embaralhadas são indicados como indisponíveis.
 
 ```sh
 kindle-turbo asura search "solo leveling" --page 1
 kindle-turbo asura chapters solo-leveling
 kindle-turbo asura download solo-leveling --all -o downloads
 kindle-turbo asura download solo-leveling --from 1 --to 5 -o downloads --kindle /mount/Kindle
+
+kindle-turbo weebcentral search "return of the disaster"
+kindle-turbo weebcentral chapters 01J76XYF85TPSFGEH5GCC1VWAW
+kindle-turbo weebcentral download 01J76XYF85TPSFGEH5GCC1VWAW --all
 ```
 
-No Kindle, o plugin KOReader em `koplugin/kindle-turbo.koplugin/` oferece busca, catálogo, download de todos os capítulos e leitura offline com escolha da pasta destino. A leitura usa o ReaderUI nativo do KOReader, que guarda o progresso. Para instalar por USB, execute `scripts/install-koplugin.sh /mount/Kindle`; o instalador exige a raiz reconhecível do Kindle, valida `documents` e `koreader/plugins`, não sobrescreve nada e instala também os avisos de licença e proveniência. Ejete o Kindle com segurança após a cópia.
+No Kindle, o plugin em `koplugin/kindle-turbo.koplugin/` permite escolher AsuraScans ou WeebCentral, buscar títulos, baixar capítulos e ler offline. A leitura usa o ReaderUI nativo do KOReader, que guarda o progresso. Para instalar por USB, execute `scripts/install-koplugin.sh /mount/Kindle`; o instalador valida `documents` e `koreader/plugins`, preserva instalações existentes e inclui licenças e proveniência. Ejete o Kindle com segurança após a cópia.
 
 O plugin também roda no KOReader para Linux, permitindo baixar no PC e copiar os CBZ para o Kindle. Os testes usam os módulos reais do KOReader no PC; a validação no Kindle físico ainda está pendente. Veja [o guia PC/Kindle](docs/asura.md) e [as atribuições](docs/licensing.md).
 

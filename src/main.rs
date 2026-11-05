@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-mod asura;
+mod manga;
 
 use kindle_turbo::{comic, epub, images, kf8, passthrough, reader};
 
@@ -67,7 +67,12 @@ enum Command {
     /// Busca e baixa manhwas do `AsuraScans` em CBZ para `KOReader`.
     Asura {
         #[command(subcommand)]
-        command: asura::Command,
+        command: manga::Command,
+    },
+    /// Busca e baixa mangás do `WeebCentral` em CBZ para `KOReader`.
+    Weebcentral {
+        #[command(subcommand)]
+        command: manga::Command,
     },
 }
 
@@ -186,8 +191,11 @@ fn is_epub_zip(p: &Path) -> bool {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    if let Some(Command::Asura { command }) = cli.command {
-        return asura::run(command);
+    if let Some(command) = cli.command {
+        return match command {
+            Command::Asura { command } => manga::run(manga::Source::Asura, command),
+            Command::Weebcentral { command } => manga::run(manga::Source::WeebCentral, command),
+        };
     }
     if let Some(j) = cli.jobs {
         rayon::ThreadPoolBuilder::new().num_threads(j).build_global().ok();

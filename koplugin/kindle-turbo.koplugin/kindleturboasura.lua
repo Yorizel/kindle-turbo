@@ -2,12 +2,10 @@
 -- See docs/licensing.md in the repository for provenance.
 local JSON = require("json")
 local util = require("util")
-local http = require("socket.http")
-local socket = require("socket")
-local socketutil = require("socketutil")
 local urlutil = require("socket.url")
+local Http = require("kindleturbohttp")
 
-local Source = { site = "https://asurascans.com", api = "https://api.asurascans.com/api" }
+local Source = { id = "asurascans", name = "AsuraScans", site = "https://asurascans.com", api = "https://api.asurascans.com/api" }
 
 function Source.unwrap(value)
     if type(value) ~= "table" then return value end
@@ -28,30 +26,8 @@ function Source.props(html, key)
     return nil, "AsuraScans: dados '" .. key .. "' ausentes. O site pode ter mudado ou bloqueado a conexão."
 end
 
-function Source.get(url)
-    local chunks, size = {}, 0
-    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
-    local ok, code = pcall(function()
-        return socket.skip(1, http.request{
-            url = url,
-            headers = {
-                ["User-Agent"] = "Mozilla/5.0 Kindle-Turbo/0.1",
-                ["Referer"] = Source.site .. "/",
-                ["Accept-Encoding"] = "identity",
-            },
-            sink = function(chunk)
-                if chunk then
-                    size = size + #chunk
-                    if size > 16 * 1024 * 1024 then return nil, "Resposta maior que 16 MiB" end
-                    chunks[#chunks + 1] = chunk
-                end
-                return 1
-            end,
-        })
-    end)
-    socketutil:reset_timeout()
-    if not ok or code ~= 200 then return nil, "AsuraScans: HTTP " .. tostring(code) .. ". Tente novamente mais tarde." end
-    return table.concat(chunks)
+function Source.get(url, image)
+    return Http.get(url, Source.site, 1, image)
 end
 
 function Source.json(path)
@@ -78,6 +54,7 @@ function Source.chapters(slug)
     if type(slug) ~= "string" or #slug > 120 or not slug:match("^[%w%-]+$") then return nil, "Slug inválido" end
     local details, err = Source.json("/series/" .. slug)
     if not details then return nil, err end
+    if type(details.data) == "table" then details = details.data end
     details = details.series or details
     if type(details) ~= "table" then return nil, "AsuraScans: dados da série inválidos" end
     if type(details.title) ~= "string" or details.title == "" then return nil, "AsuraScans: título ausente" end
@@ -123,12 +100,10 @@ function Source.pages(public_path, number)
     return pages
 end
 
-function Source.imageExtension(data)
-    if data:sub(1, 3) == "\255\216\255" then return "jpg" end
-    if data:sub(1, 8) == "\137PNG\13\10\26\10" then return "png" end
-    if data:sub(1, 4) == "RIFF" and data:sub(9, 12) == "WEBP" then return "webp" end
-    if data:sub(1, 3) == "GIF" then return "gif" end
-    return nil, "O servidor não retornou uma imagem válida"
+Source.imageExtension = Http.imageExtension
+
+function Source.chapterURL(details, chapter)
+    return Source.site .. "/series/" .. details.slug .. "/chapter/" .. tostring(chapter.number)
 end
 
 return Source

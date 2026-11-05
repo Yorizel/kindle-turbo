@@ -14,6 +14,16 @@ local function read(path)
     local value = file:read("*a"); file:close(); return value
 end
 local Source = require("kindleturboasura")
+local http = require("socket.http")
+local original_request, sent_request = http.request, nil
+http.request = function(request) sent_request = request; request.sink("body"); return 1, 200 end
+local transport = require("kindleturbohttp")
+assert(transport.get("https://api.asurascans.com/api/series", "https://asurascans.com", 0) == "body")
+assert(sent_request.headers.Accept:find("text/html", 1, true))
+assert(transport.get("https://official.lowee.us/page.png", "https://weebcentral.com", 0, true) == "body")
+assert(sent_request.headers.Accept:find("image/", 1, true))
+assert(sent_request.headers.Referer == "https://weebcentral.com/" and sent_request.headers.Origin == nil)
+http.request = original_request
 local chapters = assert(Source.props(read(repo .. "/tests/fixtures/asura/chapters.html"), "chapters")).chapters
 assert(#chapters == 2 and chapters[1].number == 82 and not Source.locked(chapters[1]) and Source.locked(chapters[2]))
 local pages = assert(Source.props(read(repo .. "/tests/fixtures/asura/pages.html"), "pages")).pages
@@ -30,8 +40,42 @@ Source.json = function() return {series = {title = "Null fixture", public_url = 
 Source.get = function() return '<astro-island props="{&quot;chapters&quot;:[1,[[0,{&quot;number&quot;:[0,1],&quot;title&quot;:[0,null]}]]]}" />' end
 local null_chapters = assert(Source.chapters("null-fixture"))
 assert(#null_chapters == 1 and null_chapters[1].title == "")
+Source.json = function() return {data = {series = {title = "Wrapped fixture", public_url = "/comics/null-fixture"}}} end
+local wrapped_chapters, wrapped_error, wrapped_details = Source.chapters("null-fixture")
+assert(wrapped_chapters, wrapped_error)
+assert(wrapped_details.title == "Wrapped fixture" and #wrapped_chapters == 1)
 Source.get, Source.json = original_get, original_json
 print("PASS real Astro fixtures, locks, missing/empty/scrambled pages")
+
+local Weeb = require("kindleturboweebcentral")
+local weeb_items, weeb_err, weeb_more = Weeb.parseSearch(read(repo .. "/tests/fixtures/weebcentral/search.html"))
+assert(weeb_items, weeb_err)
+assert(#weeb_items == 2 and weeb_items[2].title == "Series & Examples" and weeb_more)
+local weeb_chapters = assert(Weeb.parseChapters(read(repo .. "/tests/fixtures/weebcentral/chapters.html")))
+assert(#weeb_chapters == 4 and weeb_chapters[1].id ~= weeb_chapters[4].id)
+assert(weeb_chapters[2].title == "Special" and weeb_chapters[3].title == "Volume 1")
+local weeb_pages = assert(Weeb.parsePages(read(repo .. "/tests/fixtures/weebcentral/pages.html")))
+assert(#weeb_pages == 2 and weeb_pages[1] == "https://official.lowee.us/fixture/001.png?x=1&y=2")
+assert(not Weeb.parsePages("<html>challenge</html>"))
+assert(not Weeb.parseChapters("<html>challenge</html>"))
+assert(not Weeb.parseSearch("<html>challenge</html>"))
+local large_catalog = {}
+for index = 1, 196 do
+    large_catalog[#large_catalog + 1] = string.format('<div x-data="{}"><a href="/chapters/%026d"><span class="flex"><span>Chapter %d</span><span><svg><path></path></svg></span></span><time>date</time></a><input><input></div>', index, index)
+end
+assert(#assert(Weeb.parseChapters(table.concat(large_catalog))) == 196, "native parser must not truncate the full catalog at 1000 iterations")
+local weeb_get = Weeb.get
+Weeb.get = function(url)
+    if url:find("full-chapter-list", 1, true) then return read(repo .. "/tests/fixtures/weebcentral/chapters.html") end
+    if url:find("/images?", 1, true) then return read(repo .. "/tests/fixtures/weebcentral/pages.html") end
+    return read(repo .. "/tests/fixtures/weebcentral/details.html")
+end
+local weeb_list, details_error, weeb_details = Weeb.chapters(weeb_items[1].slug)
+assert(weeb_list, details_error)
+assert(weeb_details.title == "Series & Examples" and weeb_details.slug == weeb_items[1].slug)
+assert(#assert(Weeb.pages(weeb_details.public_url, nil, weeb_list[1])) == 2)
+Weeb.get = weeb_get
+print("PASS WeebCentral HTML, opaque IDs, decimals, volumes/extras, entities and image order")
 
 local scheduled, messages, standby = {}, {}, 0
 local UI = {
@@ -107,3 +151,42 @@ drain()
 assert(not turbo.job and not lfs.attributes(next_path(4)) and not lfs.attributes(next_path(4) .. ".part"))
 assert(standby == 0 and require("pluginshare").pause_auto_suspend == nil)
 print("PASS cancellation, partial ownership, HTTP-image rejection and cleanup")
+
+weeb_details.source = Weeb
+Weeb.pages = function() return {"https://example.test/weeb-1.png", "https://example.test/weeb-2.png"} end
+Weeb.get = function() return image end
+turbo:startDownloads(weeb_details, weeb_chapters)
+drain()
+assert(not turbo.job)
+local weeb_paths = {}
+for _, chapter in ipairs(weeb_chapters) do
+    local chapter_path = turbo:chapterPath(weeb_details, chapter)
+    assert(not weeb_paths[chapter_path] and chapter_path ~= path)
+    weeb_paths[chapter_path] = true
+    assert(turbo:archiveValid(chapter_path, chapter.url))
+    local reader = require("ffi/archiver").Reader:new()
+    assert(reader:open(chapter_path))
+    for entry in reader:iterate() do
+        if entry.path == "kindle-turbo.json" then
+            assert(JSON.decode(reader:extractToMemory(entry.index)).source == "weebcentral")
+        end
+    end
+    reader:close()
+end
+assert(turbo:archiveValid(path, chapter_url))
+assert(standby == 0 and require("pluginshare").pause_auto_suspend == nil)
+print("PASS WeebCentral CBZ jobs use their own source, unique paths and manifests; Asura downloads preserved")
+
+local original_show, original_asura_search, original_weeb_search, original_weeb_chapters = turbo.showMenu, Source.search, Weeb.search, Weeb.chapters
+local menu_items, selected_provider
+turbo.showMenu = function(_, _, items) menu_items = items; return {} end
+Source.search = function() return {{title = "Asura", slug = "asura"}}, nil, false end
+Weeb.search = function() return {{title = "Weeb", slug = "weeb"}}, nil, false end
+Weeb.chapters = function() selected_provider = Weeb; return {}, nil, {title = "Weeb", slug = "weeb"} end
+turbo:catalog("weeb", 1, Weeb)
+local weeb_callback = menu_items[1].callback
+turbo:catalog("asura", 1, Source)
+weeb_callback()
+assert(selected_provider == Weeb)
+turbo.showMenu, Source.search, Weeb.search, Weeb.chapters = original_show, original_asura_search, original_weeb_search, original_weeb_chapters
+print("PASS catalog callbacks retain the selected source across other catalog interactions")
