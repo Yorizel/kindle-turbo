@@ -61,3 +61,34 @@ fn help_works() {
     assert!(st.status.success());
     assert!(String::from_utf8_lossy(&st.stdout).contains("--kindle"));
 }
+
+#[test]
+fn asura_commands_validate_selection_before_network_access() {
+    let help = Command::new(BIN).args(["asura", "download", "--help"]).output().unwrap();
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--kindle"));
+    for args in [
+        vec!["asura", "download", "fixture"],
+        vec!["asura", "download", "fixture", "--from", "2", "--to", "1"],
+        vec!["asura", "download", "fixture", "--all", "--from", "1"],
+        vec!["asura", "search", "--page", "0"],
+    ] {
+        assert!(!Command::new(BIN).args(args).output().unwrap().status.success());
+    }
+}
+
+#[test]
+fn weebcentral_exposes_the_same_commands_and_explicit_chapter_ids() {
+    let help = Command::new(BIN).args(["weebcentral", "download", "--help"]).output().unwrap();
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--chapter"));
+    for args in [
+        vec!["weebcentral", "download", "fixture"],
+        vec!["weebcentral", "download", "fixture", "--chapter", "id", "--all"],
+        vec!["weebcentral", "download", "fixture", "--chapter", "id", "--from", "1"],
+        vec!["weebcentral", "download", "fixture", "--from", "2", "--to", "1"],
+        vec!["weebcentral", "search", "--page", "0"],
+    ] {
+        assert!(!Command::new(BIN).args(args).output().unwrap().status.success());
+    }
+}

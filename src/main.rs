@@ -1,21 +1,25 @@
 #![forbid(unsafe_code)]
 
+mod manga;
+
 use kindle_turbo::{comic, epub, images, kf8, passthrough, reader};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::{Context, Result, anyhow};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// Conversor EPUB / manhwa -> AZW3 (Kindle) ultra rápido, usa todos os núcleos.
 #[derive(Parser, Debug)]
-#[command(version, about)]
+#[command(version, about, subcommand_negates_reqs = true, args_conflicts_with_subcommands = true)]
 #[expect(clippy::struct_excessive_bools, reason = "each bool is an independent CLI switch; the flag names are part of the interface")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Arquivos .epub, .cbz/.zip ou pastas de imagens (manhwa/mangá)
     #[arg(required = true)]
     inputs: Vec<PathBuf>,
@@ -56,6 +60,20 @@ struct Cli {
     /// Número de threads (padrão: todos os núcleos)
     #[arg(short, long)]
     jobs: Option<usize>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Busca e baixa manhwas do `AsuraScans` em CBZ para `KOReader`.
+    Asura {
+        #[command(subcommand)]
+        command: manga::Command,
+    },
+    /// Busca e baixa mangás do `WeebCentral` em CBZ para `KOReader`.
+    Weebcentral {
+        #[command(subcommand)]
+        command: manga::Command,
+    },
 }
 
 fn sanitize(name: &str) -> String {
@@ -173,6 +191,12 @@ fn is_epub_zip(p: &Path) -> bool {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(command) = cli.command {
+        return match command {
+            Command::Asura { command } => manga::run(manga::Source::Asura, command),
+            Command::Weebcentral { command } => manga::run(manga::Source::WeebCentral, command),
+        };
+    }
     if let Some(j) = cli.jobs {
         rayon::ThreadPoolBuilder::new().num_threads(j).build_global().ok();
     }
